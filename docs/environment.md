@@ -97,7 +97,7 @@ RERANK_DOWNLOAD_IF_MISSING=false
 RERANK_FALLBACK_TO_FAISS=true
 ```
 
-切换 embedding 模型后必须重新 ingest。旧索引和新 query 向量不属于同一个向量空间，系统会用 `document_indexes.embedding_model` 检查这类冲突。
+切换 embedding 模型后必须重建已有文档的向量索引。旧索引和新 query 向量不属于同一个向量空间，系统会用 `document_indexes.embedding_model` 检查这类冲突；已有 chunks 可通过 `POST /internal/lancedb/documents/{doc_id}/rebuild` 重新计算 embedding。
 
 ### 3. 生成模型
 

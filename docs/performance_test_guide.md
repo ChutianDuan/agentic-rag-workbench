@@ -125,10 +125,10 @@ curl http://127.0.0.1:8080/v1/monitor/overview
 
 ```bash
 # 只验证上传与 ingest
-bash scripts/e2e_ingest.sh ./day7_demo.md
+bash scripts/e2e_ingest.sh ./README.md
 
 # 验证 Gateway 上传、ingest、Chat、citations 与 monitor
-bash scripts/e2e_all.sh ./day7_demo.md
+bash scripts/e2e_all.sh ./README.md
 ```
 
 检查点：
@@ -159,7 +159,7 @@ source .venv/bin/activate
 python3 scripts/metrics_benchmark.py \
   --python-base-url http://127.0.0.1:8000 \
   --gateway-base-url http://127.0.0.1:8080 \
-  --file ./day7_demo.md \
+  --file ./README.md \
   --async-requests 6 \
   --stream-requests 6 \
   --concurrency 1
@@ -375,7 +375,7 @@ python3 scripts/metrics_benchmark.py \
 python3 scripts/metrics_benchmark.py \
   --python-base-url http://127.0.0.1:8000 \
   --gateway-base-url http://127.0.0.1:8080 \
-  --file ./day7_demo.md \
+  --file ./README.md \
   --async-requests 6 \
   --stream-requests 6 \
   --concurrency 1

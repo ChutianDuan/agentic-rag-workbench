@@ -20,10 +20,10 @@ curl http://127.0.0.1:8000/internal/health
 准备演示文档：
 
 ```bash
-ls ./day7_demo.md
+ls ./README.md
 ```
 
-如果文档不存在，可以换成任意小型 `.md` 或 `.txt` 文件。
+`README.md` 是仓库内现有的演示材料；也可以换成任意小型 `.md` 或 `.txt` 文件。
 
 如果启用了 Gateway API Key，下面的 CLI 请求还需要增加 `X-API-Key` header。不要为了演示临时把真实密钥写进文档或命令历史。
 
@@ -34,7 +34,7 @@ ls ./day7_demo.md
 ### 操作
 
 1. 打开 `http://127.0.0.1:5173`，在 Settings 创建或选择用户。
-2. 从 Documents 或左侧文档轨道上传 `day7_demo.md`；也可以导入可直接访问的 `http(s)` URL。
+2. 从 Documents 或左侧文档轨道上传 `README.md`；也可以导入可直接访问的 `http(s)` URL。
 3. 观察 Parsing、Chunking、Embedding，等待最终状态变为 Indexed。
 4. 进入 Sessions 创建会话，保持 `Agent + RAG` 开启。
 5. 在中央 Execution Flow 选择 `CrossEncoder 重排`，准备观察候选数、rank 和 score 变化。
@@ -58,7 +58,7 @@ ls ./day7_demo.md
 目标：确认普通 RAG 基线路径仍可运行。
 
 ```bash
-bash scripts/e2e_all.sh ./day7_demo.md
+bash scripts/e2e_all.sh ./README.md
 ```
 
 预期：
@@ -75,7 +75,7 @@ bash scripts/e2e_all.sh ./day7_demo.md
 
 目标：不依赖前端，直接展示 Agent SSE 事件。
 
-先准备 `SESSION_ID`。如果已经通过前端创建过会话，可直接使用对应 ID；也可以用接口创建：
+先准备 `SESSION_ID`。如果已经通过前端创建过会话，可直接使用对应 ID；也可以用接口创建，并从响应的 `data.session_id` 读取实际 ID。后续命令中的 `1`、`doc_ids:[1]` 和 Run ID 仅为示例，执行时应替换为本次创建的值：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/sessions \

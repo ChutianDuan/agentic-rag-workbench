@@ -169,7 +169,7 @@ GET  /internal/agent/runs/{run_id}/steps
 
 1. 打开 `http://127.0.0.1:5173`。
 2. 在 Settings 创建或选择用户，然后回到 Sessions 创建会话。
-3. 从左侧文档轨道上传 `day7_demo.md`，或导入一个可直接访问的网页 URL。
+3. 从左侧文档轨道上传 `README.md`，或导入一个可直接访问的网页 URL。
 4. 等待文档依次经过 Parsing、Chunking、Embedding，最终进入 Indexed；失败时直接查看任务错误。
 5. 保持 `Agent + RAG` 开启，提问：`根据知识库总结这个系统的架构和核心链路`。
 6. 观察中央 Execution Flow：`knowledge_search`、LanceDB、MySQL hydration、CrossEncoder 与保存 citations 只会依据真实事件推进。
@@ -181,10 +181,10 @@ GET  /internal/agent/runs/{run_id}/steps
 普通 RAG 一键链路：
 
 ```bash
-bash scripts/e2e_all.sh ./day7_demo.md
+bash scripts/e2e_all.sh ./README.md
 ```
 
-Agent 流式链路可以在完成上传、建库、创建 session 后调用：
+Agent 流式链路可以在完成上传、建库、创建 session 后调用。以下 `session_id=1` 和 `run_id=1` 仅为示例，执行时使用实际返回的 ID：
 
 ```bash
 curl -N -X POST http://127.0.0.1:8080/v1/agent/chat/stream \

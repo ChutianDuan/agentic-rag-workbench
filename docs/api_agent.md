@@ -16,7 +16,7 @@ RAG 客户端真正需要稳定的不是 URL 数量，而是三类契约：普�
 | 流式 Agent | `POST /v1/agent/chat/stream` | SSE `final` 后的 `done` |
 | Trace 调试 | `/internal/agent/runs/{id}` | 持久化 run / steps / tool calls |
 
-## JSON envelope 与一个已知例外
+## JSON envelope 与 SSE
 
 普通 JSON 接口统一返回：
 
@@ -28,9 +28,7 @@ RAG 客户端真正需要稳定的不是 URL 数量，而是三类契约：普�
 }
 ```
 
-FastAPI 验证错误、业务错误和多数 Gateway 错误也使用相同 envelope，并通过 HTTP status 表达传输层语义。
-
-Gateway 自身的参数校验、鉴权、限流错误也使用同一 envelope；SSE 错误仍通过 `type=error` 事件表达。
+FastAPI 验证错误、业务错误，以及 Gateway 参数校验、鉴权、限流错误都使用相同 envelope，并通过 HTTP status 表达传输层语义。SSE 错误通过 `type=error` 事件表达。
 
 SSE 接口返回 `text/event-stream`。可续传事件同时在 SSE `id` 和 JSON `event_id` 中带编号：
 
@@ -62,7 +60,7 @@ Content-Type: multipart/form-data
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/documents \
   -F "user_id=1" \
-  -F "file=@./day7_demo.md"
+  -F "file=@./README.md"
 ```
 
 响应重点字段：
@@ -71,8 +69,8 @@ curl -X POST http://127.0.0.1:8080/v1/documents \
 {
   "data": {
     "doc_id": 12,
-    "task_id": "ingest-xxx",
-    "status_url": "/v1/tasks/ingest-xxx"
+    "task_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status_url": "/v1/tasks/550e8400-e29b-41d4-a716-446655440000"
   }
 }
 ```
@@ -106,15 +104,17 @@ Content-Type: application/json
 {
   "data": {
     "doc_id": 13,
-    "filename": "example-page.md",
-    "task_id": "ingest-xxx",
-    "status_url": "/v1/tasks/ingest-xxx",
+    "filename": "web_example.com_example_page.md",
+    "task_id": "550e8400-e29b-41d4-a716-446655440001",
+    "status_url": "/internal/tasks/550e8400-e29b-41d4-a716-446655440001",
     "source_url": "https://example.com/page",
     "final_url": "https://example.com/page",
     "title": "Example Page"
   }
 }
 ```
+
+网页导入由 FastAPI 返回的 `status_url` 指向内部路径；外部客户端应使用 `task_id` 请求 Gateway 的 `/v1/tasks/{task_id}`。
 
 ### 查询任务状态
 
@@ -226,14 +226,14 @@ Content-Type: application/json
 {
   "data": {
     "message_id": 21,
-    "task_id": "chat-xxx",
+    "task_id": "550e8400-e29b-41d4-a716-446655440002",
     "state": "PENDING",
-    "status_url": "/v1/tasks/chat-xxx"
+    "status_url": "/internal/tasks/550e8400-e29b-41d4-a716-446655440002"
   }
 }
 ```
 
-客户端随后轮询 `/v1/tasks/{task_id}`，成功后调用 `/v1/sessions/{session_id}/messages` 展示回答与 citations。
+普通 Chat 的 `status_url` 由 FastAPI 生成，指向内部路径；外部客户端用 `task_id` 轮询 `/v1/tasks/{task_id}`，成功后调用 `/v1/sessions/{session_id}/messages` 展示回答与 citations。
 
 ### 流式普通 RAG 问答
 
@@ -447,7 +447,7 @@ Agent 当前只允许只读工具。入口会先做轻量检索意图判断：�
         "document_id": 12,
         "chunk_id": 45,
         "chunk_index": 3,
-        "title": "day7_demo.md",
+        "title": "README.md",
         "content": "截断后的 chunk 内容",
         "snippet": "引用片段",
         "score": 0.91,
@@ -500,14 +500,14 @@ Agent 会把带有 `doc_id`、`chunk_id`、`chunk_index` 的结果转换为 cita
 | 现象 | 可能原因 | 处理 |
 | --- | --- | --- |
 | `session not found` | `session_id` 不存在。 | 先调用 `/v1/sessions` 创建会话。 |
-| `no ready document index found` | 没有 indexed 文档，或 embedding 模型切换后旧索引不可用。 | 上传文档并等待 embedding 完成，必要时重新 ingest。 |
+| `no ready document index found` | 没有 indexed 文档，或 embedding 模型切换后旧索引不可用。 | 上传文档并等待 embedding 完成；已有文档可通过内部重建接口重新计算向量。 |
 | Agent 没有工具调用 | 问题未命中强制检索路由，且被 LLM 判断为闲聊或不依赖文档。 | 提问中明确要求“根据知识库/项目文档/代码/架构/上传文档”。 |
 | citations 为空 | 工具未检索到结果，或工具结果缺少 chunk 元数据。 | 检查 `tool_result.result.data.total` 和 `/internal/agent/runs/{run_id}/steps`。 |
 | Agent 返回“已达到工具调用上限” | 达到 `max_steps` 安全上限。 | 查看 Trace 中 `termination_reason=max_steps`，必要时缩小问题或提高 `max_steps`。 |
 
 ## 客户端实现检查清单
 
-- 同时检查 HTTP status 和 JSON `code`，并兼容 Gateway 安全错误的旧结构。
+- 同时检查 HTTP status 和 JSON `code`；非 SSE 错误使用统一 envelope。
 - 异步路径以 task 状态为准，不把提交成功当成业务完成。
 - SSE parser 保留 `id`、`event` 和多行 `data`，忽略 heartbeat comment。
 - 只在收到 `done` 后认为流完整结束；`final` 表示答案已保存，但传输仍有终止事件。

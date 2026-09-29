@@ -251,7 +251,7 @@ START_INIT_DB=true START_FRONTEND=true bash scripts/start_all.sh start
 | `bash scripts/start_all.sh status` | 查看 PID 与 HTTP 健康状态 |
 | `bash scripts/start_all.sh logs worker` | 查看 Worker 最近日志 |
 | `FOLLOW_LOGS=true bash scripts/start_all.sh logs` | 跟随全部服务日志 |
-| `bash scripts/start_all.sh e2e ./day7_demo.md` | 执行完整 E2E |
+| `bash scripts/start_all.sh e2e ./README.md` | 使用仓库内现有文档执行完整 E2E |
 
 PID 保存在 `.run/`，日志写入 `logs/`。服务使用独立进程组启动，停止时会终止整个进程组，避免只退出启动 shell 而遗留 Uvicorn、Celery 或 Vite 子进程。启动脚本会等待 HTTP 端口响应；`status` 同时区分进程停止、接口不可达和依赖降级。
 
@@ -368,8 +368,10 @@ bash scripts/ci_smoke.sh
 完整链路验证：
 
 ```bash
-bash scripts/e2e_all.sh ./day7_demo.md
+bash scripts/e2e_all.sh ./README.md
 ```
+
+E2E 会写入真实的用户、文档、任务和消息记录。不传文件参数时，脚本默认使用仓库根目录的 `README.md`；也可以显式传入其他待上传文件。
 
 ## 当前取舍与仍然开放的问题
 

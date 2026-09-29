@@ -114,13 +114,15 @@ EMBEDDING_NORMALIZE=true
 
 ### 重建索引
 
-切换 embedding 模型后，必须重新 ingest 文档：
+切换 embedding 模型后，已有文档需要重新生成向量索引。先从文档列表取得实际 `doc_id`，对每个仍需检索的文档提交重建任务：
 
 ```bash
-bash scripts/e2e_ingest.sh ./day7_demo.md
+curl -X POST http://127.0.0.1:8000/internal/lancedb/documents/123/rebuild
 ```
 
-原因是旧向量索引使用的是旧向量空间。项目会把模型名写入 `document_indexes.embedding_model`，查询时如果发现当前模型和索引模型不一致，会返回冲突错误，提醒重新 ingest。
+将示例中的 `123` 换成实际 `doc_id`。响应的 `data.task_id` 可通过 `GET /internal/tasks/{task_id}` 轮询；索引完成后再确认文档 `index_status=indexed`。该接口复用已有 chunks 重新计算 embedding，不会重新解析原始文件。`e2e_ingest.sh` 会上传并创建新文档，不能用来重建已有文档。
+
+旧向量索引使用的是旧向量空间。项目会把模型名写入 `document_indexes.embedding_model`，查询时如果发现当前模型和索引模型不一致，会返回冲突错误。
 
 ## 这次实验真正值得讨论的结论
 
@@ -128,6 +130,6 @@ bash scripts/e2e_ingest.sh ./day7_demo.md
 - 为什么看 triplet margin：RAG 检索更依赖相对排序，而不是单个分数的绝对值。
 - 为什么保存 embedding model：防止旧索引和新模型混用。
 - 为什么 Recall@5/10 下降也不能直接判定失败：Top-1、MRR、NDCG 提升说明头部排序更强，但宽召回需要结合业务数据继续评估。
-- 如何接入工程：导出可加载模型、更新环境变量、重新 ingest、校验 `document_indexes.embedding_model`。
+- 如何接入工程：导出可加载模型、更新环境变量、重建已有文档向量、校验 `document_indexes.embedding_model`。
 
 还需要保留一个负面结论：这不是完整业务 QA 评估。伪检索样本与训练构造存在相关性，Top-1 提升可能部分来自数据分布。下一步应在独立人工标注集上比较默认 Qwen embedding、KALM base、LoRA 和 rerank 组合，而不是只继续优化同一套 triplet。

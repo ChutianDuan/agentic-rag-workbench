@@ -8,7 +8,7 @@ source "${REPO_ROOT}/scripts/env.sh"
 load_dotenv "${REPO_ROOT}/.env"
 
 GATEWAY_BASE_URL="${GATEWAY_BASE_URL:-http://127.0.0.1:8080}"
-TEST_FILE="${1:-./day7_demo.md}"
+TEST_FILE="${1:-./README.md}"
 USER_ID="${USER_ID:-1}"
 
 if [ ! -f "$TEST_FILE" ]; then

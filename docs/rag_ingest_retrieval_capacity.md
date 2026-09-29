@@ -118,10 +118,10 @@ chunk_count ≈ 文档字符数 / 700
 
 ### 2.4 Chunk embedding 向量化
 
-每个 chunk 会被送入 embedding 模型，生成一个固定长度向量。你当前按 `512` 维设计，可以理解为：
+每个 chunk 会被送入 embedding 模型，生成一个固定长度向量。以下以 `512` 维举例；程序实际使用模型输出的维度：
 
 ```text
-chunk_text -> embedding_model -> float32[512]
+chunk_text -> embedding_model -> float32[d]  # 示例 d=512
 ```
 
 向量化阶段有几个关键点：
@@ -186,7 +186,7 @@ LANCEDB_TABLE=chunk_vectors
 - `chunk_count`
 - `status`
 
-这里保存 `embedding_model` 很重要。查询时系统会检查当前 embedding 模型是否和建索引时一致。如果不一致，会拒绝查询并提示重新 ingest。
+这里保存 `embedding_model` 很重要。查询时系统会检查当前 embedding 模型是否和建索引时一致。如果不一致，会拒绝查询；已有文档可通过 `POST /internal/lancedb/documents/{doc_id}/rebuild` 重建向量。
 
 FAISS 相关代码仍保留在项目中，可作为历史实现或回退参考；但当前默认召回路径已经是 LanceDB。
 
@@ -197,7 +197,7 @@ FAISS 相关代码仍保留在项目中，可作为历史实现或回退参考�
 用户输入问题后，系统先把问题向量化：
 
 ```text
-question -> embedding_model -> float32[512]
+question -> embedding_model -> float32[d]  # 与建索引时的 d 一致
 ```
 
 这一步必须和文档 chunk 使用同一个模型、同一个归一化策略。否则 LanceDB 返回的最近邻没有稳定语义意义。
@@ -324,7 +324,7 @@ LLM / vLLM 推理 > reranker > embedding > LanceDB 召回
 
 如果 LanceDB 表很大、过滤范围很宽，或回 MySQL 补齐 chunk 文本很慢，检索阶段也可能成为瓶颈。此时优先看 `retrieval_ms`、`lancedb_ms`、`rerank_ms`、候选数和 MySQL 查询耗时。
 
-## 4. 先用 512 维建立可缩放的容量基线
+## 4. 以 512 维示例建立可缩放的容量基线
 
 ### 4.1 每个 chunk 的基础成本
 
@@ -340,7 +340,7 @@ vector_bytes_per_chunk = 512 * 4 = 2048 bytes ≈ 2 KB
 
 | 存储项 | 估算 |
 | --- | ---: |
-| LanceDB 向量 | 约 2 KB / chunk |
+| LanceDB 向量 | 约 2 KB / chunk（仅 512 维示例） |
 | MySQL `doc_chunks.text` | 约 1 到 4 KB / chunk，取决于文本长度和编码 |
 | LanceDB / MySQL 元数据、索引结构开销 | 数百 bytes 到数 KB / chunk |
 
@@ -433,7 +433,7 @@ chunk_count ≈ 文档字符数 / 700
 
 ### 6.2 推荐规模
 
-保持 `512` 维、LanceDB 本地向量表和 MySQL chunk 文本存储时，建议按以下规模理解：
+以 `512` 维、LanceDB 本地向量表和 MySQL chunk 文本存储为示例时，可按以下规模估算；实际部署须按模型输出维度重新计算：
 
 | 规模 | chunk 总量 | 适合程度 | 建议 |
 | --- | ---: | --- | --- |
@@ -524,7 +524,7 @@ ingest_time ≈ text_extract
 ### 7.1 向量化建议
 
 1. 固定 embedding 模型版本，并写入索引元数据。
-2. 固定 `512` 维后，查询前校验 query vector 维度和索引元数据维度一致。
+2. 记录模型实际输出维度，查询前校验 query vector 维度和索引元数据维度一致。
 3. 开启 normalize，让向量相似度更接近 cosine similarity 语义。
 4. 文档和问题使用一致的 query/document prefix 策略。
 5. 对 embedding 质量做离线评估：Recall@K、MRR、NDCG、Top-1 命中率。
@@ -562,7 +562,7 @@ ingest_time ≈ text_extract
 
 ## 9. 最终判断：先测计算链，再扩向量库
 
-在 `512` 维 embedding 下，向量本身的存储成本并不高，约 `2 KB / chunk`。如果按默认 `800` 字符切片、`100` overlap，一个百万字符文档大约会产生 `1429` 个 chunk，纯向量只有约 `2.8 MB`。因此，中小规模 RAG 系统的主要瓶颈不是向量存储，而是 embedding 模型吞吐、reranker 延迟、LLM / vLLM 上下文长度和生成吞吐。
+按 `512` 维示例计算，纯向量约 `2 KB / chunk`；实际值取决于模型输出维度。如果按默认 `800` 字符切片、`100` overlap，一个百万字符文档大约会产生 `1429` 个 chunk，纯向量只有约 `2.8 MB`。因此，中小规模 RAG 系统的主要瓶颈不是向量存储，而是 embedding 模型吞吐、reranker 延迟、LLM / vLLM 上下文长度和生成吞吐。
 
 当前 LanceDB 默认架构适合中小规模本地检索；到 10 万到 100 万 chunk 时，需要用真实 benchmark 验证 LanceDB 查询、MySQL 回表、reranker 候选数和备份恢复流程；超过百万级后，应认真考虑分片、ANN、冷热数据分层或专门向量检索架构。
 

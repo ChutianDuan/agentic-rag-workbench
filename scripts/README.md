@@ -100,7 +100,7 @@ WORKER_CUDA_VISIBLE_DEVICES=5
 
 ```bash
 bash scripts/ci_smoke.sh
-bash scripts/e2e_all.sh ./day7_demo.md
+bash scripts/e2e_all.sh ./README.md
 
 # 原始模型服务，不包含检索和 Gateway 成本
 python scripts/vllm_benchmark.py \
@@ -110,7 +110,7 @@ python scripts/vllm_benchmark.py \
   --concurrency 5
 ```
 
-E2E 脚本会创建真实数据库记录，不属于只读 smoke test。
+E2E 脚本会创建真实数据库记录，不属于只读 smoke test。不传文件参数时默认使用仓库根目录的 `README.md`，也可以显式传入其他待上传文件。
 vLLM benchmark 从 `VLLM_API_KEY` 或 `LLM_API_KEY` 读取认证信息，不会把密钥写入报告。`--requests` 表示每种模式的请求数，因此 `--mode both --requests 20` 会执行 20 个非流式请求和 20 个流式请求。
 
 ## 共享 helper

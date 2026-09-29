@@ -28,7 +28,7 @@
 
 ## 当前仍然值得优先处理的风险
 
-### 1. Gateway 错误契约还没有完全收敛
+### 1. Gateway 错误契约已统一，仍需合约测试
 
 FastAPI 与 Gateway 的非 SSE 成功和错误响应均使用 `{code, message, data}`；SSE 使用带 `type`、递增 `id` 和终止事件的独立协议。
 
@@ -66,7 +66,7 @@ Python 已有 Agent、SSE、API envelope、检索与工具回归测试；C++ Gat
 
 | 优先级 | 目标 | 可验证交付物 |
 | --- | --- | --- |
-| P1 | 收敛协议边界 | Gateway 安全错误统一 envelope；request ID 全链路透传；contract tests |
+| P1 | 验证协议边界 | Gateway 安全错误的 contract tests；request ID 全链路透传 |
 | P1 | 建立恢复能力 | LanceDB cleanup / backup / restore Runbook；embedding 切换重建演练 |
 | P1 | 补 Gateway 测试 | 鉴权、限流、query encode、SSE header 和断线的自动化测试 |
 | P2 | 建真实质量基线 | 固定 QA 集、Recall@K / MRR / NDCG、答案引用人工验收 |
@@ -89,7 +89,7 @@ cmake --build cpp_gateway/build
 ```bash
 START_FRONTEND=true bash scripts/start_all.sh start
 bash scripts/start_all.sh status
-bash scripts/e2e_all.sh ./day7_demo.md
+bash scripts/e2e_all.sh ./README.md
 ```
 
 完整 E2E 会写入真实数据库并调用当前模型服务，不能用一次历史通过结果代替重新执行。审核也不应再使用“85% 完成度”这类难以复现的数字；每个结论都应该对应代码、测试、接口响应或运行记录。

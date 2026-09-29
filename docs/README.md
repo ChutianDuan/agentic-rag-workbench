@@ -12,6 +12,8 @@
 | 想把项目在本机跑起来 | [让本地 RAG 栈稳定运行：环境与排障](environment.md) |
 | 想做一次可信的现场演示 | [如何演示一条不造假的 RAG / Agent 链路](demo_cases.md) |
 | 想理解 ingest、检索和容量边界 | [从一个文件到百万 chunk](rag_ingest_retrieval_capacity.md) |
+| 想查看数据库表与外键关系 | [数据库关系图](数据库关系.md) |
+| 想了解下一阶段的双模型评测计划 | [本地小模型路由与双模型 RAG 路线图](rag_evaluation_roadmap.md) |
 | 想设计性能实验 | [不要只测 QPS：性能测试指南](performance_test_guide.md) |
 | 想看运行指标从哪里来 | [从系统健康到检索质量：监控指标](monitoring_metrics.md) |
 | 想理解 Gateway 的安全边界 | [把流量挡在业务之前：鉴权与限流](gateway_auth_rate_limit.md) |
@@ -47,7 +49,7 @@ flowchart LR
 ## 文档维护约定
 
 - 外部调用优先写 Gateway `/v1/*`；FastAPI `/internal/*` 只用于服务间调用和调试。
-- FastAPI 和多数 Gateway JSON API 使用 `{code, message, data}`；Gateway 安全错误的旧 envelope 是当前已知例外。SSE 使用有 `type` 的编号事件，并以 `done` 或 `error` 结束。
+- FastAPI 和 Gateway 的非 SSE API，包括安全错误，均使用 `{code, message, data}`。SSE 使用有 `type` 的编号事件，并以 `done` 或 `error` 结束。
 - 启动命令以 `scripts/start_all.sh` 为统一入口；本地 vLLM 保持独立启动。
 - 新增真实验证结果时记录日期、命令、环境边界和未执行项。
 - 架构变化先更新根 README，再更新这里对应的专题文章。

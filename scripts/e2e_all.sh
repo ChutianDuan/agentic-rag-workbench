@@ -9,7 +9,7 @@ load_dotenv "${REPO_ROOT}/.env"
 
 PYTHON_BASE_URL="${PYTHON_BASE_URL:-http://127.0.0.1:8000}"
 GATEWAY_BASE_URL="${GATEWAY_BASE_URL:-http://127.0.0.1:8080}"
-TEST_FILE="${1:-./day7_demo.md}"
+TEST_FILE="${1:-./README.md}"
 TOP_K="${TOP_K:-3}"
 QUERY_TEXT="${QUERY_TEXT:-这份文档讲了什么？}"
 

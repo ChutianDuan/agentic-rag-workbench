@@ -21,6 +21,7 @@ def upload_document(
     file: UploadFile = File(...),
     user_id: int = Form(1),
 ):
+    # 保存上传文件并创建文档记录；向量索引由独立的 ingest 任务生成。
     return api_response(save_uploaded_document(user_id=user_id, upload_file=file))
 
 
@@ -39,6 +40,7 @@ def _with_ingest_job(document_result: dict):
 
 @router.post("/documents/web", response_model=ApiResponse)
 def create_web_document(req: CreateWebDocumentRequest):
+    # 保存网页内容并创建文档记录；此接口不提交 ingest 任务。
     return api_response(save_web_document(user_id=req.user_id, url=req.url))
 
 

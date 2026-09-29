@@ -24,6 +24,7 @@ from python_rag.app.retrieval.indexing_service import delete_document_vectors
 
 
 def save_uploaded_document(user_id, upload_file):
+    """校验上传文件，保存到本地，并创建数据库记录。"""
     file_path = None
     try:
         validate_supported_document_filename(upload_file.filename or "")

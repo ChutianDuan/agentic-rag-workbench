@@ -442,7 +442,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark ingest / async chat / stream chat metrics.")
     parser.add_argument("--python-base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--gateway-base-url", default="http://127.0.0.1:8080")
-    parser.add_argument("--file", default="./day7_demo.md")
+    parser.add_argument("--file", default="./README.md")
     parser.add_argument("--doc-id", type=int, default=0)
     parser.add_argument("--user-id", type=int, default=1)
     parser.add_argument("--question", default="这份文档讲了什么？")
