@@ -223,6 +223,7 @@ async def _run_agent_task(state: _AgentStreamState) -> None:
                 "agent_run_id": result["run_id"],
                 "steps_used": result.get("steps_used"),
                 "citation_count": len(result.get("citations") or []),
+                "routing": result.get("routing") or {},
             },
         )
         citations = result.get("citations") or []
@@ -254,6 +255,7 @@ async def _run_agent_task(state: _AgentStreamState) -> None:
             "lancedb_ms": retrieval.get("vector_search_latency_ms"),
             "rerank_ms": retrieval.get("rerank_latency_ms"),
             "doc_ids": citation_doc_ids,
+            "routing": result.get("routing") or {},
         }
 
         if result["answer"]:
@@ -267,6 +269,7 @@ async def _run_agent_task(state: _AgentStreamState) -> None:
                 "answer": result["answer"],
                 "citations": citations,
                 "retrieval": retrieval,
+                "routing": result.get("routing") or {},
                 "steps_used": result.get("steps_used"),
                 "e2e_latency_ms": e2e_latency_ms,
             }

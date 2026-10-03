@@ -132,6 +132,7 @@ async def agent_chat(
             "steps_used": result.get("steps_used"),
             "citation_count": len(result.get("citations") or []),
             "retrieval": result.get("retrieval") or {},
+            "routing": result.get("routing") or {},
         },
     )
     citations = result.get("citations") or []
@@ -144,6 +145,7 @@ async def agent_chat(
             "answer": result["answer"],
             "citations": citations,
             "retrieval": result.get("retrieval") or {},
+            "routing": result.get("routing") or {},
         }
     )
 

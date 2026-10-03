@@ -308,8 +308,8 @@ SSE 事件：
 | `tool_call` | 工具开始调用，工具名来自当前可用只读工具列表。 |
 | `tool_result` | 工具返回结果或失败信息，`result` 使用 `ok/error/data` 结构。 |
 | `delta` | 最终答案文本。MVP 当前在 Agent 完成后一次性输出。 |
-| `final` | 最终回答，包含 `run_id`、`message_id`、`citations`。 |
-| `done` | 流结束，`meta` 包含 `agent_run_id`、`steps_used`、`citation_count`。 |
+| `final` | 最终回答，包含 `run_id`、`message_id`、`citations`、`routing`。 |
+| `done` | 流结束，`meta` 包含 `agent_run_id`、`steps_used`、`citation_count`、`routing`。 |
 | `error` | Agent 执行失败。 |
 
 成功示例片段：
@@ -327,6 +327,27 @@ data: {"type":"done","meta":{"agent_run_id":8,"citation_count":5}}
 ```
 
 Agent 续传请求必须复用相同 `trace_id` 并携带 Last-Event-ID。后端以 session + trace ID 识别同一次运行；客户端不应在重连时生成新的 trace ID。
+
+### Agent 路由诊断
+
+Agent 的请求参数保持不变。同步响应在 `data.routing` 返回诊断；SSE 在 `final.routing` 和 `done.meta.routing` 返回相同结构，续传复用原决策。普通 RAG 接口不参与自动分流。
+
+```json
+{
+  "route": "rag",
+  "source": "rule",
+  "reason": "project_document_code_intent",
+  "model": null,
+  "latency_ms": 0,
+  "usage": {},
+  "knowledge_search_available": true,
+  "force_knowledge_search": true
+}
+```
+
+`route` 为 `rag`、`agent` 或 `fallback`；`source` 为 `rule`、`model` 或 `fallback`。规则命中时不调用分类模型；`agent` 禁用知识检索但保留其他只读工具；`fallback` 交回 Agent 判断。模型分类的 `reason` 为 `model_classification`，降级原因包括 `model_not_configured`、`model_timeout`、`model_request_failed` 和 `invalid_model_output`。
+
+`knowledge_search_available` 表示注册表中是否存在符合只读权限的检索工具；`force_knowledge_search` 表示是否安排首次强制检索。工具不可用时额外返回 `tool_unavailable_reason=knowledge_search_unavailable`。`usage` 为分类模型单独报告的用量，规则命中或无法获得用量时为空对象。最终消息的 `meta.routing` 和 run 的 `meta.routing` 保存相同诊断。
 
 ### FastAPI 非流式 Agent 问答
 

@@ -50,7 +50,7 @@ Celery 不参与 Agent 流式生成；它负责 ingest 和普通 RAG 的非流�
 
 ## 代码目录
 
-Agent 代码收敛在 `python_rag/app/agent`：`orchestrator.py` 保留稳定调用入口，`agent_runner.py` 承担执行循环，`intent_router.py` 处理轻量检索意图，`tool_protocol.py` 统一工具结果，`tools/local` 放只读工具，`streaming` 负责可续传 SSE，`trace` 负责 run / step / tool call 持久化。普通 RAG 和检索能力位于 `python_rag/app/modules`，Celery 入口位于 `python_rag/app/workers`。
+Agent 代码收敛在 `python_rag/app/agent`：`orchestrator.py` 保留稳定调用入口，`agent_runner.py` 承担执行循环，`intent_router.py` 负责规则优先、轻量模型兜底的检索路由，`tool_protocol.py` 统一工具结果，`tools/local` 放只读工具，`streaming` 负责可续传 SSE，`trace` 负责 run / step / tool call 持久化。普通 RAG 和检索能力位于 `python_rag/app/modules`，Celery 入口位于 `python_rag/app/workers`。
 
 ## 先把运行条件固定下来
 
@@ -72,6 +72,36 @@ LLM_BASE_URL=https://provider.example/v1
 LLM_API_KEY=your-api-key
 LLM_MODEL=your-model
 ```
+
+Agent 分类使用独立的轻量模型；回答仍由 `LLM_MODEL` 生成：
+
+```bash
+ROUTER_LLM_MODEL=your-lightweight-model
+# 留空时继承 LLM_BASE_URL、LLM_API_KEY 和 LLM_TOKEN_LIMIT_FIELD。
+ROUTER_LLM_BASE_URL=
+ROUTER_LLM_API_KEY=
+ROUTER_LLM_TOKEN_LIMIT_FIELD=
+ROUTER_LLM_TIMEOUT_SECONDS=5
+ROUTER_LLM_MAX_TOKENS=96
+```
+
+`ROUTER_LLM_MODEL` 必须显式设置，不会自动使用回答模型代替。分类请求使用 OpenAI-compatible `/chat/completions`，温度为 0，只调用一次，不传工具、不重试、不续写。分类通过线程执行，并受整体超时限制；取消等待不会中断已经发出的底层 HTTP 请求，迟到的结果会被忽略。`LLM_ENABLE=false` 同时禁用远端分类调用。
+
+### Agent 检索路由
+
+规则只处理明确意图：依据知识库、上传资料或项目文档回答时选择 `rag`；完整问候及单纯查询文档列表、文档详情、历史引用时选择 `agent`。仅出现 embedding、代码、架构等通用词不会直接触发检索。混合意图与追问交给轻量模型，输入包含当前问题、最近四条对话（正文合计最多 2000 字符）和会话摘要（最多 1000 字符），不包含长期用户记忆。
+
+| 路由 | 执行行为 |
+| --- | --- |
+| `rag` | 先执行一次 `knowledge_search`，再由 Agent 回答；可继续调用只读工具补充证据。 |
+| `agent` | 模型工具声明与执行白名单均移除 `knowledge_search`，其他只读工具保持可用。 |
+| `fallback` | 分类模型未配置、超时、请求失败或输出无效时，交回 Agent 自主判断是否检索。 |
+
+检索工具缺失或权限不符时不强制检索，在 `routing.tool_unavailable_reason` 记录 `knowledge_search_unavailable`，并要求回答明确说明无法访问知识库。分类不消耗 Agent 步数预算；首次强制检索仍消耗一个步骤。
+
+同步响应 `data.routing`、SSE `final.routing` 与 `done.meta.routing` 提供决策来源、原因、模型、耗时和分类用量。相同诊断保存在 run metadata 与最终消息 metadata；分类用量保存在 `routing.usage`，不混入主模型生成用量。续传重放已保存事件，不重新分类或检索。普通 RAG 接口始终走原检索流程。
+
+### 其他模型配置
 
 如果本机没有 reranker 权重且不希望演示时下载模型，可以临时设置：
 

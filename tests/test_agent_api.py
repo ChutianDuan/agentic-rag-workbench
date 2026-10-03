@@ -17,6 +17,7 @@ client = TestClient(api_test_app)
 
 class FakeAgentOrchestrator:
     calls = []
+    routing = {"route": "rag", "source": "rule", "reason": "project_document_code_intent"}
 
     async def run(self, question, session_id=None, user_message_id=None, trace_id=None):
         self.calls.append(
@@ -40,6 +41,7 @@ class FakeAgentOrchestrator:
                 }
             ],
             "steps_used": 2,
+            "routing": self.routing,
         }
 
 
@@ -104,6 +106,7 @@ def test_agent_chat_endpoint_calls_agent_and_returns_answer(monkeypatch):
                 }
             ],
             "retrieval": {},
+            "routing": FakeAgentOrchestrator.routing,
         },
     }
     assert created_messages[0]["role"] == "user"
@@ -112,6 +115,7 @@ def test_agent_chat_endpoint_calls_agent_and_returns_answer(monkeypatch):
     assert created_messages[1]["meta"]["agent_run_id"] == 1001
     assert created_messages[1]["meta"]["citation_count"] == 1
     assert created_messages[1]["meta"]["retrieval"] == {}
+    assert created_messages[1]["meta"]["routing"] == FakeAgentOrchestrator.routing
     assert saved_citations == [
         {
             "message_id": 3002,

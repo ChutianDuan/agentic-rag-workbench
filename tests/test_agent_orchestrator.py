@@ -1,9 +1,17 @@
 import asyncio
 import json
 
+import pytest
+
 from python_rag.app.agent import orchestrator
 from python_rag.app.agent.tools.base import BaseTool
 from python_rag.app.agent.tools.registry import ToolRegistry
+
+
+@pytest.fixture(autouse=True)
+def disable_external_router(monkeypatch):
+    # 未显式模拟分类器的测试使用未配置降级，不读取开发者的远端模型配置。
+    monkeypatch.setattr(orchestrator.llm_service, "ROUTER_LLM_MODEL", "")
 
 
 class FakeKnowledgeSearchTool(BaseTool):
@@ -136,12 +144,12 @@ def _patch_trace(monkeypatch, recorder):
     )
 
 
-def _tool_call(arguments, call_id="call_knowledge_1"):
+def _tool_call(arguments, call_id="call_knowledge_1", name="knowledge_search"):
     return {
         "id": call_id,
         "type": "function",
         "function": {
-            "name": "knowledge_search",
+            "name": name,
             "arguments": json.dumps(arguments, ensure_ascii=False),
         },
     }
@@ -383,7 +391,10 @@ def test_agent_orchestrator_answers_greeting_without_tool(monkeypatch):
     assert recorder.finished_steps[0]["decision"] == "final_answer"
     assert recorder.finished_runs[0]["output_data"]["observations"] == []
     assert [event["type"] for event in events].count("tool_call") == 0
-    assert llm_calls[0]["tool_choice"] == "auto"
+    assert llm_calls[0]["tools"] is None
+    assert llm_calls[0]["tool_choice"] is None
+    assert result["routing"]["route"] == "agent"
+    assert result["routing"]["source"] == "rule"
 
 
 def test_agent_orchestrator_reports_insufficient_evidence_when_search_empty(monkeypatch):
@@ -836,3 +847,155 @@ def test_agent_orchestrator_degrades_when_max_steps_reached(monkeypatch):
     assert recorder.finished_runs[0]["prompt_tokens"] == 10
     assert recorder.finished_runs[0]["completion_tokens"] == 12
     assert recorder.finished_runs[0]["total_tokens"] == 22
+
+
+def _patch_classifier(monkeypatch, route):
+    calls = []
+    monkeypatch.setattr(orchestrator.llm_service, "ROUTER_LLM_MODEL", "test-low-model")
+    monkeypatch.setattr(orchestrator.llm_service, "ROUTER_LLM_TIMEOUT_SECONDS", 5)
+
+    def classify(messages):
+        calls.append(messages)
+        return {"answer": json.dumps({"route": route}), "usage": {"total_tokens": 11}}
+
+    monkeypatch.setattr(orchestrator.llm_service, "generate_routing_decision", classify)
+    return calls
+
+
+@pytest.mark.parametrize("max_steps", [1, 3])
+def test_low_model_rag_route_forces_search_without_consuming_extra_step(monkeypatch, max_steps):
+    recorder = FakeTraceRecorder()
+    _patch_trace(monkeypatch, recorder)
+    knowledge_tool = FakeKnowledgeSearchTool()
+    routing_calls = _patch_classifier(monkeypatch, "rag")
+    main_calls = []
+
+    def answer(messages, tools=None, tool_choice=None):
+        main_calls.append(tools)
+        assert len(knowledge_tool.calls) == 1
+        assert any(item["role"] == "tool" for item in messages)
+        return {"answer": "项目架构说明", "usage": {"total_tokens": 20}}
+
+    monkeypatch.setattr(orchestrator.llm_service, "generate_from_messages", answer)
+    result = asyncio.run(orchestrator.AgentOrchestrator(
+        registry=ToolRegistry([knowledge_tool]), max_steps=max_steps,
+    ).run("继续解释上面的模块"))
+    assert len(routing_calls) == 1
+    assert len(main_calls) == 1
+    assert result["steps_used"] == 2
+    assert knowledge_tool.calls == [{"query": "继续解释上面的模块"}]
+    assert result["routing"]["source"] == "model"
+    assert result["routing"]["force_knowledge_search"] is True
+    assert result["routing"]["usage"] == {"total_tokens": 11}
+    assert result["citations"][0]["doc_id"] == 7
+    assert recorder.finished_runs[0]["total_tokens"] == 20
+    assert recorder.runs[0]["meta"]["routing"] == result["routing"]
+    assert recorder.finished_runs[0]["output_data"]["routing"] == result["routing"]
+    if max_steps == 1:
+        assert main_calls[0] is None
+        assert result["termination_reason"] == "max_steps"
+
+
+class FakeListDocumentsTool(BaseTool):
+    name = "list_ready_documents"
+    description = "List ready documents."
+    input_schema = {"type": "object", "properties": {}, "additionalProperties": False}
+    permission_level = "readonly"
+
+    def __init__(self):
+        self.calls = []
+        super().__init__()
+
+    async def run(self, arguments):
+        self.calls.append(arguments)
+        return {"documents": [{"doc_id": 7, "title": "architecture.md"}]}
+
+
+@pytest.mark.parametrize("question,use_model", [("解释 embedding", True), ("列出文档", False)])
+def test_agent_route_enforces_search_denial_and_keeps_metadata_tools(monkeypatch, question, use_model):
+    recorder = FakeTraceRecorder()
+    _patch_trace(monkeypatch, recorder)
+    knowledge_tool = FakeKnowledgeSearchTool()
+    document_tool = FakeListDocumentsTool()
+    routing_calls = _patch_classifier(monkeypatch, "agent")
+    main_calls = []
+
+    def answer(messages, tools=None, tool_choice=None):
+        main_calls.append(messages)
+        assert [item["function"]["name"] for item in tools] == ["list_ready_documents"]
+        assert "禁止调用 knowledge_search" in messages[0]["content"]
+        if len(main_calls) == 1:
+            # 即使主模型忽略声明并请求检索，执行端也必须拒绝。
+            return {"tool_calls": [
+                _tool_call({"query": "不允许检索"}),
+                _tool_call({}, call_id="list_1", name="list_ready_documents"),
+            ]}
+        assert any("tool is not allowed by routing" in item["content"] for item in messages if item["role"] == "tool")
+        return {"answer": "可用文档为 architecture.md"}
+
+    monkeypatch.setattr(orchestrator.llm_service, "generate_from_messages", answer)
+    result = asyncio.run(orchestrator.AgentOrchestrator(
+        registry=ToolRegistry([knowledge_tool, document_tool]),
+    ).run(question))
+    assert len(routing_calls) == int(use_model)
+    assert result["routing"]["route"] == "agent"
+    assert result["routing"]["force_knowledge_search"] is False
+    assert result["citations"] == []
+    assert knowledge_tool.calls == []
+    assert document_tool.calls == [{}]
+    assert recorder.failed_tool_calls[0]["error_message"] == "tool is not allowed by routing: knowledge_search"
+    assert len(recorder.finished_tool_calls) == 1
+
+
+def test_failed_classifier_returns_tool_choice_to_agent(monkeypatch):
+    recorder = FakeTraceRecorder()
+    _patch_trace(monkeypatch, recorder)
+    knowledge_tool = FakeKnowledgeSearchTool()
+
+    def classify(messages):
+        raise orchestrator.llm_service.LLMServiceError("router request failed")
+
+    monkeypatch.setattr(orchestrator.llm_service, "generate_routing_decision", classify)
+    calls = []
+
+    def answer(messages, tools=None, tool_choice=None):
+        calls.append(messages)
+        assert [item["function"]["name"] for item in tools] == ["knowledge_search"]
+        assert "本次路由降级" in messages[0]["content"]
+        if len(calls) == 1:
+            assert knowledge_tool.calls == []
+            return {"tool_calls": [_tool_call({"query": "系统架构"})]}
+        return {"answer": "根据检索结果说明架构"}
+
+    monkeypatch.setattr(orchestrator.llm_service, "generate_from_messages", answer)
+    result = asyncio.run(orchestrator.AgentOrchestrator(
+        registry=ToolRegistry([knowledge_tool]),
+    ).run("继续解释上面的模块"))
+    assert result["routing"]["route"] == "fallback"
+    assert result["routing"]["reason"] == "model_request_failed"
+    assert result["routing"]["force_knowledge_search"] is False
+    assert knowledge_tool.calls == [{"query": "系统架构"}]
+    assert result["citations"]
+
+
+@pytest.mark.parametrize("non_readonly", [False, True])
+def test_unavailable_search_is_recorded_and_not_forced(monkeypatch, non_readonly):
+    recorder = FakeTraceRecorder()
+    _patch_trace(monkeypatch, recorder)
+    knowledge_tool = FakeKnowledgeSearchTool()
+    knowledge_tool.permission_level = "write"
+    registry = ToolRegistry([knowledge_tool] if non_readonly else [])
+
+    def answer(messages, tools=None, tool_choice=None):
+        assert tools is None
+        assert "缺少知识库访问能力" in messages[0]["content"]
+        return {"answer": "当前缺少知识库访问能力，无法确认项目文档中的结论。"}
+
+    monkeypatch.setattr(orchestrator.llm_service, "generate_from_messages", answer)
+    result = asyncio.run(orchestrator.AgentOrchestrator(registry=registry).run("根据项目文档总结系统架构"))
+    assert result["routing"]["route"] == "rag"
+    assert result["routing"]["tool_unavailable_reason"] == "knowledge_search_unavailable"
+    assert result["routing"]["force_knowledge_search"] is False
+    assert result["steps_used"] == 1
+    assert knowledge_tool.calls == []
+    assert recorder.tool_calls == []

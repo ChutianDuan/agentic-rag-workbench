@@ -20,6 +20,12 @@ from python_rag.app.core.config import (
     LLM_TOP_P,
     LLM_FREQUENCY_PENALTY,
     LLM_PRESENCE_PENALTY,
+    ROUTER_LLM_MODEL,
+    ROUTER_LLM_BASE_URL,
+    ROUTER_LLM_API_KEY,
+    ROUTER_LLM_TIMEOUT_SECONDS,
+    ROUTER_LLM_MAX_TOKENS,
+    ROUTER_LLM_TOKEN_LIMIT_FIELD,
 )
 from python_rag.app.shared import http_client
 
@@ -447,6 +453,53 @@ def _merge_stream_tool_call_deltas(
                     str(function_target.get("arguments") or "")
                     + str(function_delta["arguments"])
                 )
+
+
+def generate_routing_decision(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """独立分类请求：不附加回答续写指令，不传工具，也不重试。"""
+    if not LLM_ENABLE:
+        raise LLMServiceError("LLM service is disabled by config")
+    if not ROUTER_LLM_MODEL:
+        raise LLMServiceError("ROUTER_LLM_MODEL is not configured")
+    if not ROUTER_LLM_BASE_URL:
+        raise LLMServiceError("ROUTER_LLM_BASE_URL is not configured")
+    if ROUTER_LLM_TIMEOUT_SECONDS <= 0 or ROUTER_LLM_MAX_TOKENS <= 0:
+        raise LLMServiceError("router timeout and token limit must be positive")
+
+    headers = {"Content-Type": "application/json"}
+    if ROUTER_LLM_API_KEY:
+        headers["Authorization"] = "Bearer %s" % ROUTER_LLM_API_KEY
+    payload = {
+        "model": ROUTER_LLM_MODEL,
+        "messages": messages,
+        "temperature": 0,
+        "stream": False,
+        ROUTER_LLM_TOKEN_LIMIT_FIELD: ROUTER_LLM_MAX_TOKENS,
+    }
+    started_at = time.perf_counter()
+    try:
+        response = http_client.post(
+            ROUTER_LLM_BASE_URL + "/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=ROUTER_LLM_TIMEOUT_SECONDS,
+            # 保持单次分类预算，避免重定向导致第二次请求。
+            allow_redirects=False,
+        )
+    except requests.Timeout:
+        raise LLMServiceError("router request timed out") from None
+    except requests.RequestException:
+        raise LLMServiceError("router request failed") from None
+    if not 200 <= response.status_code < 300:
+        # 不将远端响应正文或连接凭据写入公开 routing 信息。
+        raise LLMServiceError("router http error status=%s" % response.status_code)
+    try:
+        result = _extract_answer(response.json())
+    except (ValueError, TypeError, AttributeError, LLMServiceError):
+        raise LLMServiceError("router response is invalid") from None
+    result["model"] = ROUTER_LLM_MODEL
+    result["latency_ms"] = int((time.perf_counter() - started_at) * 1000)
+    return result
 
 
 def generate_from_messages(

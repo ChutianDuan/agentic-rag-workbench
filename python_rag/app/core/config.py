@@ -158,6 +158,18 @@ LLM_TOKEN_LIMIT_FIELD = (
 LLM_MAX_GENERATION_ROUNDS = int(os.getenv("LLM_MAX_GENERATION_ROUNDS", "3"))
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 
+# 分类模型必须显式指定；连接信息可复用主模型，生成参数保持独立。
+ROUTER_LLM_MODEL = os.getenv("ROUTER_LLM_MODEL", "").strip()
+ROUTER_LLM_BASE_URL = (
+    os.getenv("ROUTER_LLM_BASE_URL", "").strip() or LLM_BASE_URL
+).rstrip("/")
+ROUTER_LLM_API_KEY = os.getenv("ROUTER_LLM_API_KEY", "").strip() or LLM_API_KEY
+ROUTER_LLM_TIMEOUT_SECONDS = float(os.getenv("ROUTER_LLM_TIMEOUT_SECONDS", "5"))
+ROUTER_LLM_MAX_TOKENS = int(os.getenv("ROUTER_LLM_MAX_TOKENS", "96"))
+ROUTER_LLM_TOKEN_LIMIT_FIELD = (
+    os.getenv("ROUTER_LLM_TOKEN_LIMIT_FIELD", "").strip() or LLM_TOKEN_LIMIT_FIELD
+)
+
 
 def _optional_float_env(name: str):
     value = os.getenv(name, "").strip()

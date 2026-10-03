@@ -7,9 +7,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from python_rag.app.agent import orchestration_config as config
 from python_rag.app.agent.intent_router import (
-    KNOWLEDGE_SEARCH_ROUTER_REASON,
+    RouteDecision,
     build_forced_knowledge_search_tool_call as _build_forced_knowledge_search_tool_call,
-    should_force_knowledge_search as _should_force_knowledge_search,
+    route_question,
 )
 from python_rag.app.agent.memory import session as session_memory
 from python_rag.app.agent.schemas import AgentStepStatus, AgentToolCallStatus
@@ -40,6 +40,8 @@ MAX_STEPS_FALLBACK_ANSWER = (
     "已达到工具调用上限，以下结论仅基于已有观察；当前证据不足以继续补充，"
     "建议缩小问题或提高 max_steps 后重试。"
 )
+
+
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -224,6 +226,48 @@ class AgentRunExecutor:
         self.orchestrator = orchestrator
         self.trace_service = trace_service_module
         self.llm_service = llm_service_module
+        self.allowed_tool_names: Optional[Set[str]] = None
+
+    def _apply_routing(
+        self,
+        decision: RouteDecision,
+        readonly_tool_names: List[str],
+    ) -> Tuple[Dict[str, Any], str, List[dict]]:
+        """统一生成工具限制、提示词和持久化诊断，执行端使用相同白名单。"""
+        tool_schemas = self.orchestrator._tool_schemas()
+        self.allowed_tool_names = {
+            schema["function"]["name"] for schema in tool_schemas
+            if schema["function"]["name"] in readonly_tool_names
+        }
+        knowledge_available = KNOWLEDGE_SEARCH_TOOL_NAME in self.allowed_tool_names
+        routing = decision.to_dict()
+        routing["knowledge_search_available"] = knowledge_available
+        routing["force_knowledge_search"] = decision.route == "rag" and knowledge_available
+
+        if decision.route == "agent":
+            self.allowed_tool_names.discard(KNOWLEDGE_SEARCH_TOOL_NAME)
+            instruction = (
+                "本次路由为 agent：不需要知识库检索，禁止调用 knowledge_search。"
+                "可使用会话上下文、通用知识以及已注册的其他只读工具回答。"
+            )
+        elif decision.route == "rag":
+            instruction = "本次路由为 rag：回答需要知识库证据。"
+            if knowledge_available:
+                instruction += "先检索再回答。"
+        else:
+            instruction = "本次路由降级：请自主判断是否需要知识库证据，并在需要时先检索。"
+        if not knowledge_available:
+            routing["tool_unavailable_reason"] = "knowledge_search_unavailable"
+            instruction += (
+                "当前没有可用的 knowledge_search，无法访问知识库内容。"
+                "如问题需要知识库证据，必须明确说明缺少知识库访问能力，不得编造文档结论。"
+            )
+
+        tool_schemas = [
+            schema for schema in tool_schemas
+            if schema["function"]["name"] in self.allowed_tool_names
+        ]
+        return routing, config.SYSTEM_PROMPT + "\n\n" + instruction, tool_schemas
 
     async def _finish_failed_tool_call(
         self,
@@ -417,6 +461,10 @@ class AgentRunExecutor:
 
         started_at = time.time()
         try:
+            if self.allowed_tool_names is not None and tool_name not in self.allowed_tool_names:
+                raise config.AgentOrchestratorError(
+                    "tool is not allowed by routing: {0}".format(tool_name)
+                )
             tool = self.orchestrator._get_readonly_tool(tool_name)
             validation_error = _validate_tool_arguments(
                 arguments,
@@ -502,6 +550,127 @@ class AgentRunExecutor:
                 latency_ms=int((time.time() - started_at) * 1000),
             )
 
+    async def _run_forced_knowledge_search(
+        self,
+        question: str,
+        run_id: int,
+        messages: List[Dict[str, Any]],
+        reason: str,
+        event_sink: Optional[config.AgentEventSink],
+        seen_tool_calls: Set[str],
+    ) -> Dict[str, Any]:
+        """执行路由指定的首次检索，复用工具校验、去重和 Trace 流程。"""
+        step_index = 0
+        tool_call = _build_forced_knowledge_search_tool_call(question)
+        step_name = "forced_knowledge_search_{0}".format(step_index)
+        step_type = "forced_tool_call"
+        step_id = self.trace_service.create_step(
+            run_id=run_id,
+            step_index=step_index,
+            step_type=step_type,
+            name=step_name,
+            input_data={
+                "messages": messages,
+                "tool_call": tool_call,
+                "reason": reason,
+            },
+        )
+        await _emit_agent_event(
+            event_sink,
+            "agent_step",
+            {
+                "run_id": run_id,
+                "step_id": step_id,
+                "step_index": step_index,
+                "step_type": step_type,
+                "name": step_name,
+                "status": AgentStepStatus.RUNNING,
+                "reason": reason,
+            },
+        )
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [tool_call],
+            }
+        )
+        observation = await self._execute_tool_call(
+            run_id=run_id,
+            step_id=step_id,
+            tool_call=tool_call,
+            fallback_index=0,
+            event_sink=event_sink,
+            seen_tool_calls=seen_tool_calls,
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": observation["tool_call_id"],
+                "name": observation["tool_name"],
+                "content": _json_dumps(observation["result"]),
+            }
+        )
+
+        self.trace_service.finish_step(
+            step_id=step_id,
+            output_data={
+                "observations": [observation],
+                "reason": reason,
+            },
+            decision="forced_tool_call",
+            prompt_tokens=None,
+            completion_tokens=None,
+            total_tokens=None,
+            latency_ms=None,
+        )
+        await _emit_agent_event(
+            event_sink,
+            "agent_step",
+            {
+                "run_id": run_id,
+                "step_id": step_id,
+                "step_index": step_index,
+                "step_type": step_type,
+                "name": step_name,
+                "status": AgentStepStatus.SUCCESS,
+                "decision": "forced_tool_call",
+                "tool_call_count": 1,
+            },
+        )
+        return observation
+
+    def _finish_run_result(
+        self,
+        run_id: int,
+        answer: str,
+        messages: List[Dict[str, Any]],
+        observations: List[Dict[str, Any]],
+        routing: Dict[str, Any],
+        total_usage: Dict[str, Optional[int]],
+        steps_used: int,
+        termination_reason: str,
+    ) -> Dict[str, Any]:
+        output = {
+            "answer": answer,
+            "observations": observations,
+            "citations": _extract_observation_citations(observations),
+            "retrieval": _extract_observation_retrieval_summary(observations),
+            "routing": routing,
+            "steps_used": steps_used,
+            "termination_reason": termination_reason,
+        }
+        # 分类用量保存在 routing.usage，不混入主模型的生成用量。
+        self.trace_service.finish_run(
+            run_id=run_id,
+            output_data=output,
+            prompt_tokens=total_usage["prompt_tokens"],
+            completion_tokens=total_usage["completion_tokens"],
+            total_tokens=total_usage["total_tokens"],
+        )
+        return dict(output, run_id=run_id, messages=messages)
+
     async def run(
         self,
         question: str,
@@ -534,10 +703,13 @@ class AgentRunExecutor:
             )
 
         readonly_tool_names = self.orchestrator._readonly_tool_names()
-        force_knowledge_search = (
-            KNOWLEDGE_SEARCH_TOOL_NAME in readonly_tool_names
-            and _should_force_knowledge_search(question)
+        decision = await route_question(
+            question,
+            memory=memory,
+            llm_service_module=self.llm_service,
         )
+        routing, system_prompt, tool_schemas = self._apply_routing(decision, readonly_tool_names)
+        force_knowledge_search = routing["force_knowledge_search"]
 
         run_id = self.trace_service.create_run(
             agent_name=self.orchestrator.agent_name,
@@ -550,16 +722,17 @@ class AgentRunExecutor:
                 "agent_version": config.AGENT_VERSION,
                 "prompt_version": config.PROMPT_VERSION,
                 "max_steps": self.orchestrator.max_steps,
-                "tools": readonly_tool_names,
+                "tools": [name for name in readonly_tool_names if name in self.allowed_tool_names],
                 "permission_level": config.READONLY_PERMISSION_LEVEL,
                 "retrieval_router": {
                     "force_knowledge_search": force_knowledge_search,
                     "reason": (
-                        KNOWLEDGE_SEARCH_ROUTER_REASON
+                        decision.reason
                         if force_knowledge_search
                         else None
                     ),
                 },
+                "routing": routing,
                 "memory": {
                     "user_id": memory.user_id,
                     "message_count": memory.message_count,
@@ -577,9 +750,9 @@ class AgentRunExecutor:
         )
         messages = _build_initial_messages(
             question,
+            system_prompt=system_prompt,
             memory=memory,
         )
-        tool_schemas = self.orchestrator._tool_schemas()
         observations: List[Dict[str, Any]] = []
         seen_tool_calls: Set[str] = set()
         total_usage: Dict[str, Optional[int]] = {
@@ -592,86 +765,16 @@ class AgentRunExecutor:
         try:
             step_index = 0
             if force_knowledge_search:
-                tool_call = _build_forced_knowledge_search_tool_call(question)
-                step_name = "forced_knowledge_search_{0}".format(step_index)
-                step_type = "forced_tool_call"
-                step_id = self.trace_service.create_step(
+                observation = await self._run_forced_knowledge_search(
+                    question=question,
                     run_id=run_id,
-                    step_index=step_index,
-                    step_type=step_type,
-                    name=step_name,
-                    input_data={
-                        "messages": messages,
-                        "tool_call": tool_call,
-                        "reason": KNOWLEDGE_SEARCH_ROUTER_REASON,
-                    },
-                )
-                await _emit_agent_event(
-                    event_sink,
-                    "agent_step",
-                    {
-                        "run_id": run_id,
-                        "step_id": step_id,
-                        "step_index": step_index,
-                        "step_type": step_type,
-                        "name": step_name,
-                        "status": AgentStepStatus.RUNNING,
-                        "reason": KNOWLEDGE_SEARCH_ROUTER_REASON,
-                    },
-                )
-
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [tool_call],
-                    }
-                )
-                observation = await self._execute_tool_call(
-                    run_id=run_id,
-                    step_id=step_id,
-                    tool_call=tool_call,
-                    fallback_index=0,
+                    messages=messages,
+                    reason=decision.reason,
                     event_sink=event_sink,
                     seen_tool_calls=seen_tool_calls,
                 )
                 observations.append(observation)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": observation["tool_call_id"],
-                        "name": observation["tool_name"],
-                        "content": _json_dumps(observation["result"]),
-                    }
-                )
-
-                self.trace_service.finish_step(
-                    step_id=step_id,
-                    output_data={
-                        "observations": [observation],
-                        "reason": KNOWLEDGE_SEARCH_ROUTER_REASON,
-                    },
-                    decision="forced_tool_call",
-                    prompt_tokens=None,
-                    completion_tokens=None,
-                    total_tokens=None,
-                    latency_ms=None,
-                )
-                await _emit_agent_event(
-                    event_sink,
-                    "agent_step",
-                    {
-                        "run_id": run_id,
-                        "step_id": step_id,
-                        "step_index": step_index,
-                        "step_type": step_type,
-                        "name": step_name,
-                        "status": AgentStepStatus.SUCCESS,
-                        "decision": "forced_tool_call",
-                        "tool_call_count": 1,
-                    },
-                )
-                step_index += 1
+                step_index = 1
 
             while step_index < self.orchestrator.max_steps:
                 step_name = "agent_step_{0}".format(step_index)
@@ -743,32 +846,18 @@ class AgentRunExecutor:
                             "answer": final_answer,
                         },
                     )
-                    citations = _extract_observation_citations(observations)
-                    retrieval = _extract_observation_retrieval_summary(observations)
-                    self.trace_service.finish_run(
+                    result = self._finish_run_result(
                         run_id=run_id,
-                        output_data={
-                            "answer": final_answer,
-                            "observations": observations,
-                            "citations": citations,
-                            "retrieval": retrieval,
-                            "termination_reason": "final_answer",
-                        },
-                        prompt_tokens=total_usage["prompt_tokens"],
-                        completion_tokens=total_usage["completion_tokens"],
-                        total_tokens=total_usage["total_tokens"],
+                        answer=final_answer,
+                        messages=messages,
+                        observations=observations,
+                        routing=routing,
+                        total_usage=total_usage,
+                        steps_used=step_index + 1,
+                        termination_reason="final_answer",
                     )
                     run_closed = True
-                    return {
-                        "run_id": run_id,
-                        "answer": final_answer,
-                        "messages": messages,
-                        "observations": observations,
-                        "citations": citations,
-                        "retrieval": retrieval,
-                        "steps_used": step_index + 1,
-                        "termination_reason": "final_answer",
-                    }
+                    return result
 
                 assistant_message = {
                     "role": "assistant",
@@ -897,33 +986,18 @@ class AgentRunExecutor:
                     "answer": final_answer,
                 },
             )
-            citations = _extract_observation_citations(observations)
-            retrieval = _extract_observation_retrieval_summary(observations)
-            self.trace_service.finish_run(
+            result = self._finish_run_result(
                 run_id=run_id,
-                output_data={
-                    "answer": final_answer,
-                    "observations": observations,
-                    "citations": citations,
-                    "retrieval": retrieval,
-                    "steps_used": step_index + 1,
-                    "termination_reason": "max_steps",
-                },
-                prompt_tokens=total_usage["prompt_tokens"],
-                completion_tokens=total_usage["completion_tokens"],
-                total_tokens=total_usage["total_tokens"],
+                answer=final_answer,
+                messages=finalization_messages,
+                observations=observations,
+                routing=routing,
+                total_usage=total_usage,
+                steps_used=step_index + 1,
+                termination_reason="max_steps",
             )
             run_closed = True
-            return {
-                "run_id": run_id,
-                "answer": final_answer,
-                "messages": finalization_messages,
-                "observations": observations,
-                "citations": citations,
-                "retrieval": retrieval,
-                "steps_used": step_index + 1,
-                "termination_reason": "max_steps",
-            }
+            return result
         except Exception as exc:
             if not run_closed:
                 self.trace_service.fail_run(

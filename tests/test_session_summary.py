@@ -402,6 +402,7 @@ def test_agent_prompt_injects_session_summary_and_recent_messages(monkeypatch, c
     recorder = FakeTraceRecorder()
     _patch_trace(monkeypatch, recorder)
     captured_llm_calls = []
+    monkeypatch.setattr(orchestrator.llm_service, "ROUTER_LLM_MODEL", "")
 
     monkeypatch.setattr(
         orchestrator.session_memory,
