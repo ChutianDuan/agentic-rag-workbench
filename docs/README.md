@@ -6,7 +6,8 @@
 
 | 你现在想解决的问题 | 建议阅读 |
 | --- | --- |
-| 想先理解整个项目 | [根 README：架构与完整执行链](../README.md) |
+| 想快速看懂整个项目 | [三分钟架构与流程图](architecture.md) |
+| 想进一步理解系统设计 | [根 README：架构与完整执行链](../README.md) |
 | 想理解 Agent 为什么不是普通 RAG 的替代品 | [从 RAG 基线到可观测 Agent](agent_mvp.md) |
 | 想调接口或实现客户端 | [在 JSON 与 SSE 之间：Agent API 契约](api_agent.md) |
 | 想把项目在本机跑起来 | [让本地 RAG 栈稳定运行：环境与排障](environment.md) |

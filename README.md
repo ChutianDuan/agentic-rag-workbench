@@ -8,6 +8,10 @@ RAG 系统最容易被低估的地方，是它看起来只需要“检索几段�
 
 ## 一张图先看清边界
 
+![RAG Gateway Stack 架构与主要流程](./docs/architecture-overview.png)
+
+第一次了解项目，先看[三分钟架构与流程图](docs/architecture.md)：组件职责、文档入库、RAG / Agent 问答，以及对应代码入口。[高清 PNG](docs/architecture-overview.png) 可直接用于分享或演示。
+
 ```mermaid
 flowchart LR
     Browser[React RAG Workbench]
