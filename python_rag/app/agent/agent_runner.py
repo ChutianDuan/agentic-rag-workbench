@@ -1,3 +1,5 @@
+"""一次 Agent 运行的编排：加载记忆、路由、执行工具、记录 Trace 并汇总回答证据。"""
+
 import asyncio
 import inspect
 import json
@@ -131,6 +133,7 @@ def _coerce_score(value: Any) -> float:
 def _extract_observation_citations(
     observations: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
+    """从知识检索观察中提取并去重引用；当前引用代表检索证据，不是逐句使用标记。"""
     citations: List[Dict[str, Any]] = []
     seen: Set[Tuple[int, int]] = set()
 
@@ -202,20 +205,18 @@ def _extract_observation_retrieval_summary(
     return summary
 
 
-def _build_initial_messages(
-    question: str,
-    system_prompt: str = config.SYSTEM_PROMPT,
-    memory: Optional[session_memory.SessionMemory] = None,
-) -> List[Dict[str, Any]]:
-    return session_memory.build_agent_messages(
-        system_prompt=system_prompt,
-        question=question,
-        memory=memory,
-    )
+def _build_tool_observation_message(observation: Dict[str, Any]) -> Dict[str, Any]:
+    """把工具观察写回模型上下文；调用 ID 与 assistant.tool_calls 对应，失败也需回传。"""
+    return {
+        "role": "tool",
+        "tool_call_id": observation["tool_call_id"],
+        "name": observation["tool_name"],
+        "content": _json_dumps(observation["result"]),
+    }
 
 
 class AgentRunExecutor:
-    """Runs the agent decision loop for an AgentOrchestrator facade."""
+    """维护单次运行的工具白名单；工具循环完成后返回回答、引用和路由诊断。"""
 
     def __init__(
         self,
@@ -245,6 +246,7 @@ class AgentRunExecutor:
         routing["force_knowledge_search"] = decision.route == "rag" and knowledge_available
 
         if decision.route == "agent":
+            # 同时收紧工具声明和执行白名单，防止模型绕过无需检索的路由结果。
             self.allowed_tool_names.discard(KNOWLEDGE_SEARCH_TOOL_NAME)
             instruction = (
                 "本次路由为 agent：不需要知识库检索，禁止调用 knowledge_search。"
@@ -366,6 +368,7 @@ class AgentRunExecutor:
         event_sink: Optional[config.AgentEventSink] = None,
         seen_tool_calls: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
+        """校验并执行一个工具调用，将成功、失败和重复调用都记录为可回查的观察。"""
         external_tool_call_id = _tool_call_id(tool_call, fallback_index)
         tool_name = _tool_call_name(tool_call)
 
@@ -409,6 +412,7 @@ class AgentRunExecutor:
 
         duplicate_error = None
         if seen_tool_calls is not None:
+            # 签名按工具名和排序后的参数生成；同一次运行中相同调用只执行一次。
             signature = _tool_call_signature(tool_name, arguments)
             if signature in seen_tool_calls:
                 duplicate_error = "duplicate tool call skipped: {0}".format(
@@ -461,6 +465,7 @@ class AgentRunExecutor:
 
         started_at = time.time()
         try:
+            # 路由白名单、只读权限和参数校验各司其职，全部通过后才能调用工具。
             if self.allowed_tool_names is not None and tool_name not in self.allowed_tool_names:
                 raise config.AgentOrchestratorError(
                     "tool is not allowed by routing: {0}".format(tool_name)
@@ -604,14 +609,7 @@ class AgentRunExecutor:
             event_sink=event_sink,
             seen_tool_calls=seen_tool_calls,
         )
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": observation["tool_call_id"],
-                "name": observation["tool_name"],
-                "content": _json_dumps(observation["result"]),
-            }
-        )
+        messages.append(_build_tool_observation_message(observation))
 
         self.trace_service.finish_step(
             step_id=step_id,
@@ -679,10 +677,12 @@ class AgentRunExecutor:
         user_message_id: Optional[int] = None,
         event_sink: Optional[config.AgentEventSink] = None,
     ) -> Dict[str, Any]:
+        """完成一次业务运行；Trace 在这里结束，assistant 消息与引用由 HTTP/SSE 入口落库。"""
         question = str(question or "").strip()
         if not question:
             raise config.AgentOrchestratorError("question is required")
 
+        # HTTP 入口已保存 user message 时，通过其 ID 避免把本轮问题重复放进历史上下文。
         memory = session_memory.load_session_memory(
             session_id=session_id,
             current_user_message_id=user_message_id,
@@ -703,6 +703,7 @@ class AgentRunExecutor:
             )
 
         readonly_tool_names = self.orchestrator._readonly_tool_names()
+        # 前置分类不占 Agent 步数，决策完成后再创建带 routing metadata 的 run。
         decision = await route_question(
             question,
             memory=memory,
@@ -748,8 +749,8 @@ class AgentRunExecutor:
                 },
             },
         )
-        messages = _build_initial_messages(
-            question,
+        messages = session_memory.build_agent_messages(
+            question=question,
             system_prompt=system_prompt,
             memory=memory,
         )
@@ -765,6 +766,7 @@ class AgentRunExecutor:
         try:
             step_index = 0
             if force_knowledge_search:
+                # 首次强制检索计为第 0 步，随后从第 1 步开始让回答模型决策。
                 observation = await self._run_forced_knowledge_search(
                     question=question,
                     run_id=run_id,
@@ -776,6 +778,7 @@ class AgentRunExecutor:
                 observations.append(observation)
                 step_index = 1
 
+            # 每轮模型决策记为一步，一步可以含多个工具调用；max_steps 并非工具调用次数上限。
             while step_index < self.orchestrator.max_steps:
                 step_name = "agent_step_{0}".format(step_index)
                 step_type = "llm_decision"
@@ -878,14 +881,7 @@ class AgentRunExecutor:
                     )
                     observations.append(observation)
                     step_observations.append(observation)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": observation["tool_call_id"],
-                            "name": observation["tool_name"],
-                            "content": _json_dumps(observation["result"]),
-                        }
-                    )
+                    messages.append(_build_tool_observation_message(observation))
 
                 self.trace_service.finish_step(
                     step_id=step_id,
@@ -915,6 +911,7 @@ class AgentRunExecutor:
                 )
                 step_index += 1
 
+            # 步数预算耗尽后仍安排一次无工具收尾，让模型基于已有观察说明结论或证据不足。
             finalization_messages = messages + [
                 {
                     "role": "system",

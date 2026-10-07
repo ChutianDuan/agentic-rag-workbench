@@ -1,3 +1,5 @@
+"""模型工具调用与本地工具之间的协议转换、基础参数校验和结果归一化。"""
+
 import json
 from typing import Any, Dict, List, Optional
 
@@ -6,6 +8,7 @@ _STANDARD_RESULT_KEYS = {"ok", "error", "data"}
 
 
 def parse_tool_arguments(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    """接收服务商返回的参数对象或 JSON 字符串；拒绝数组等无法作为具名参数的值。"""
     function = tool_call.get("function") or {}
     raw_arguments = function.get("arguments")
     if raw_arguments is None or raw_arguments == "":
@@ -56,6 +59,7 @@ def tool_error_result(
 
 
 def normalize_tool_result(result: Any) -> Dict[str, Any]:
+    """统一为 ok/error/data，兼容旧工具直接返回数据字典的形式。"""
     if not isinstance(result, dict):
         return tool_error_result("tool result must be a JSON object")
     if is_standard_tool_result(result):
@@ -94,6 +98,10 @@ def _matches_schema_type(value: Any, schema_type: str) -> bool:
 
 
 def validate_tool_arguments(arguments: Dict[str, Any], schema: Any) -> Optional[str]:
+    """返回基础 Schema 校验错误或 None；只检查必填、类型、额外字段和数值范围。
+
+    这不是完整 JSON Schema 验证器，也不替代工具内部对文档存在性等业务条件的检查。
+    """
     if not isinstance(arguments, dict):
         return "tool arguments must be a JSON object"
     if not isinstance(schema, dict):

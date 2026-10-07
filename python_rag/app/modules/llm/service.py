@@ -1,3 +1,5 @@
+"""共用模型传输与响应解析；分类、工具决策和普通生成使用各自的请求预算。"""
+
 import copy
 import json
 import re
@@ -309,6 +311,7 @@ def _normalize_tool_calls(value: Any) -> List[Dict[str, Any]]:
 
 
 def _extract_answer(resp_json: Dict[str, Any]) -> Dict[str, Any]:
+    """从服务商响应提取文本、工具调用和用量；文本是否符合路由 JSON 由路由器校验。"""
     choices = resp_json.get("choices") or []
     if not choices:
         raise LLMServiceError("llm response missing choices")
@@ -456,7 +459,10 @@ def _merge_stream_tool_call_deltas(
 
 
 def generate_routing_decision(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """独立分类请求：不附加回答续写指令，不传工具，也不重试。"""
+    """使用 ROUTER_LLM_* 发起单次分类，返回文本和诊断，不传工具、不续写、不重试。
+
+    当前通过提示词要求 JSON，未启用推理端 Schema 约束；非法结果由意图路由器降级。
+    """
     if not LLM_ENABLE:
         raise LLMServiceError("LLM service is disabled by config")
     if not ROUTER_LLM_MODEL:
@@ -507,6 +513,7 @@ def generate_from_messages(
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[Any] = None,
 ) -> Dict[str, Any]:
+    """用主模型生成回答或工具调用；普通回答可自动续写，工具决策保持单轮请求。"""
     if not LLM_ENABLE:
         raise LLMServiceError("LLM service is disabled by config")
 
@@ -521,6 +528,7 @@ def generate_from_messages(
 
     url = LLM_BASE_URL + "/chat/completions"
     headers = _build_headers()
+    # 工具观察由 Agent 追加后再请求模型，不能在传输层自行续写工具决策上下文。
     tool_calling_request = tools is not None or tool_choice is not None
     loop_messages = (
         [copy.deepcopy(message) for message in messages]
@@ -631,6 +639,7 @@ def stream_from_messages(
     tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Optional[Any] = None,
 ) -> Generator[Dict[str, Any], None, None]:
+    """消费服务商 SSE，返回文本增量及最终统计；传输块的 JSON 不要求回答文本也是 JSON。"""
     if not LLM_ENABLE:
         raise LLMServiceError("LLM service is disabled by config")
 

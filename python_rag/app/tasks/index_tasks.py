@@ -1,3 +1,5 @@
+"""Celery 入库入口：解析与向量化分别排队和记录进度，向量化失败仍保留解析成果。"""
+
 import uuid
 
 from python_rag.app.core.error_codes import TaskState
@@ -33,6 +35,7 @@ def _update_vector_index_job(celery_task_id, **kwargs):
 
 @celery_app.task(bind=True, name="python_rag.tasks.parse_document")
 def parse_document_task(self, doc_id: int):
+    """完成解析后创建独立向量化任务，返回其 ID，供客户端继续跟踪第二阶段。"""
     celery_task_id = self.request.id
     result = parse_document_for_chunks(
         doc_id=doc_id,
@@ -40,6 +43,7 @@ def parse_document_task(self, doc_id: int):
         progress_callback=_progress_callback(self),
     )
 
+    # 先保存业务任务记录再派发，并显式指定同一个 Celery ID，避免查询时找不到任务元数据。
     embedding_task_id = str(uuid.uuid4())
     db_task_id = create_task_record(
         celery_task_id=embedding_task_id,
@@ -60,6 +64,7 @@ def parse_document_task(self, doc_id: int):
             task_id=embedding_task_id,
         )
     except Exception as exc:
+        # 解析已经完成，但向量化未能入队：文档索引和父子任务都要报告失败。
         logger.exception("failed to queue build_embedding_task")
         update_document_index_status(doc_id, DocumentIndexStatus.FAILED, str(exc))
         update_task_record(
@@ -104,6 +109,7 @@ def parse_document_task(self, doc_id: int):
 
 @celery_app.task(bind=True, name="python_rag.tasks.build_embedding")
 def build_embedding_task(self, doc_id: int):
+    """执行第二阶段向量化，同步维护索引作业状态，成功后文档才进入可检索集合。"""
     celery_task_id = self.request.id
     _update_vector_index_job(
         celery_task_id,

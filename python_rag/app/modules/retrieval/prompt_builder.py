@@ -1,4 +1,6 @@
-from typing import Any, Dict, List, Optional
+"""将检索片段及来源标识组装成 RAG Prompt，截断正文时仍保留可回查的来源信息。"""
+
+from typing import Dict, List, Optional
 
 from python_rag.app.core.config import CHAT_MAX_CHUNK_CHARS
 from python_rag.app.modules.retrieval.schemas import PromptBuildResult, RetrievedChunk

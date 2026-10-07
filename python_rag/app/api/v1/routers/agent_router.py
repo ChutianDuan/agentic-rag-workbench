@@ -1,3 +1,5 @@
+"""Agent HTTP 适配层：校验会话、调用共用编排器、保存消息，并提供 Trace 查询。"""
+
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header
@@ -25,6 +27,7 @@ from python_rag.app.shared.schemas import ApiResponse
 
 
 internal_router = APIRouter(prefix="/internal/agent", tags=["agent"])
+# Gateway 的现有 Agent 转发仍使用 /api/agent，兼容入口与内部入口共享同一实现。
 legacy_router = APIRouter(
     prefix="/api/agent",
     tags=["agent"],
@@ -94,6 +97,7 @@ async def agent_chat(
     req: AgentChatRequest,
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
 ):
+    """按 stream 参数选择传输方式；两种入口共用 AgentOrchestrator 的业务决策。"""
     if req.stream:
         return _agent_streaming_response(req, last_event_id=last_event_id)
 
@@ -120,6 +124,7 @@ async def agent_chat(
             http_status=500,
         )
 
+    # 编排器已结束 Trace，但消息与引用尚未保存；全部落库后才能返回成功响应。
     assistant_message = create_message(
         session_id=req.session_id,
         role="assistant",

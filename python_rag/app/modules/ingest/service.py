@@ -1,3 +1,5 @@
+"""文档入库业务：先将解析结果保存为 MySQL chunks，再从这些记录生成向量索引。"""
+
 import time
 
 from python_rag.app.core.config import INGEST_CHUNK_OVERLAP, INGEST_CHUNK_SIZE
@@ -15,7 +17,6 @@ from python_rag.app.modules.documents.repo import (
     get_document_by_id,
     list_chunks_by_doc_id,
     update_chunks_index_status,
-    update_document_index_status,
     update_document_status,
     upsert_document_index,
 )
@@ -39,6 +40,7 @@ from python_rag.app.modules.tasks.repo import update_task_record
 
 
 def _emit_progress(celery_task_id, state, progress, meta, progress_callback=None, error=None):
+    """先更新业务任务记录，再尝试同步 Celery 进度；回调失败不覆盖主任务的处理结果。"""
     update_task_record(
         celery_task_id=celery_task_id,
         state=state,
@@ -69,6 +71,7 @@ def _get_document_or_raise(doc_id):
 
 
 def parse_document_for_chunks(doc_id, celery_task_id, progress_callback=None):
+    """解析已落盘文档并替换其 chunks，返回解析统计；本阶段完成时尚不能检索。"""
     started_at = time.perf_counter()
     text_extract_ms = None
     chunking_ms = None
@@ -145,6 +148,7 @@ def parse_document_for_chunks(doc_id, celery_task_id, progress_callback=None):
             progress_callback=progress_callback,
         )
 
+        # MySQL 是正文来源；后续向量化必须读取这里生成的 chunk ID 和正文，保持两者对应。
         insert_started_at = time.perf_counter()
         delete_chunks_by_doc_id(doc_id)
         chunk_count = bulk_insert_chunks(doc_id, chunks)
@@ -152,6 +156,7 @@ def parse_document_for_chunks(doc_id, celery_task_id, progress_callback=None):
         if chunk_count <= 0:
             raise AppError(ERR_CELERY_ERROR, "bulk_insert_chunks inserted 0 rows")
 
+        # 正文落库只推进到 PARSED，文档仍为 UPLOADED；向量索引完成后才推进到 INDEXED。
         update_document_status(
             doc_id,
             DocumentState.UPLOADED,
@@ -228,6 +233,7 @@ def parse_document_for_chunks(doc_id, celery_task_id, progress_callback=None):
 
 
 def build_embedding_index_for_document(doc_id, celery_task_id, progress_callback=None):
+    """读取持久化 chunks、生成向量并写入 LanceDB；全部完成后才标记文档为 indexed。"""
     started_at = time.perf_counter()
     embedding_ms = None
     index_ms = None
@@ -288,6 +294,7 @@ def build_embedding_index_for_document(doc_id, celery_task_id, progress_callback
             progress_callback=progress_callback,
         )
 
+        # 向量索引可重建；写入成功后再更新 MySQL 索引元数据和文档可检索状态。
         index_started_at = time.perf_counter()
         index_meta = upsert_document_chunk_vectors(
             document=doc,

@@ -1,3 +1,5 @@
+"""内部 API 组装入口：统一异常响应，注册薄路由；业务流程在 modules 和 agent 中实现。"""
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException

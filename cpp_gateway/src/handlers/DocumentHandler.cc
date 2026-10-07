@@ -156,6 +156,7 @@ std::string DocumentService::sha256Hex(const std::string& data) {
     return utils::getSha256(data);
 }
 
+// 文件上传链路：Gateway 校验并落盘 -> 写入 documents -> 调用 Python 提交异步入库任务。
 void DocumentService::uploadAndSubmit(
     const HttpRequestPtr& req,
     std::function<void(const HttpResponsePtr&)>&& callback
@@ -254,7 +255,7 @@ void DocumentService::uploadAndSubmit(
     const std::string storedName = buildStoredFileName(userId, originalName, sha256);
     const std::string storagePath = (getUploadDir() / storedName).string();
 
-    // Keep the original filename in metadata while storing a collision-safe name on disk.
+    // 元数据保留原文件名，磁盘使用带唯一后缀的名称；Python Worker 后续读取共享 storage_path。
     try {
         std::ofstream ofs(storagePath, std::ios::binary);
         if (!ofs) {
@@ -296,11 +297,13 @@ void DocumentService::uploadAndSubmit(
                 return;
             }
 
+            // 保存 doc_id 后再派发任务，Worker 才能据此查找正文文件和业务记录。
             pythonClient_->submitIngestJob(
                 docId,
                 [dbClient, sharedCallback, docId, originalName, storagePath]
                 (bool ok, const Json::Value& pythonJson, const std::string& err) mutable {
                     if (!ok) {
+                        // 入队失败时尽力删除文件并回滚文档记录；数据库清理失败会反映在响应中。
                         tryDeleteFile(storagePath);
                         dbClient->execSqlAsync(
                             "DELETE FROM documents WHERE id=?",

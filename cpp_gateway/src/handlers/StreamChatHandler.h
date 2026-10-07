@@ -11,6 +11,7 @@
 class PythonSSEClient;
 class PythonApiClient;
 
+// SSE 请求适配与并发控制；实际生成在 Python 后端，网关只代理连接与事件。
 class StreamChatService {
 public:
     StreamChatService(
@@ -49,6 +50,7 @@ private:
         const std::string& message,
         drogon::HttpStatusCode status
     );
+    static drogon::HttpResponsePtr buildStreamLimitResponse();
     std::shared_ptr<StreamSlotLease> acquireStreamSlot() const;
     void startStreamResponse(
         const Json::Value& body,

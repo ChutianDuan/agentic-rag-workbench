@@ -1,3 +1,5 @@
+"""Agent SSE 的生成任务、事件缓存与订阅管理；客户端重连只重放同一次运行。"""
+
 import asyncio
 import logging
 import time
@@ -33,6 +35,8 @@ class _BufferedAgentEvent:
 
 @dataclass
 class _AgentStreamState:
+    """一条流的进程内状态；task 属于生成过程，subscribers 属于各次客户端连接。"""
+
     key: Tuple[int, str, str]
     session_id: int
     message: str
@@ -56,6 +60,7 @@ def _stream_key(
     message: str,
     trace_id: Optional[str],
 ) -> Tuple[int, str, str]:
+    """优先以会话和 trace_id 标识运行，未提供 trace_id 时兼容按问题文本识别。"""
     normalized_trace_id = str(trace_id or "").strip()
     if normalized_trace_id:
         return (session_id, "trace", normalized_trace_id)
@@ -67,6 +72,7 @@ def _is_terminal_event(event: Dict[str, Any]) -> bool:
 
 
 def _cleanup_stream_registry(now: Optional[float] = None) -> None:
+    """只清理已结束的流：先按完成时间过期，再淘汰超出数量上限的最早完成流。"""
     now = now if now is not None else time.monotonic()
     expired_keys = [
         key
@@ -90,25 +96,18 @@ def _cleanup_stream_registry(now: Optional[float] = None) -> None:
         _STREAMS.pop(state.key, None)
 
 
-def _build_numbered_sse(
-    payload: Dict[str, Any],
-    event_id: Optional[int],
-    event: Optional[str] = None,
-) -> str:
-    return build_sse_event(payload, event=event, event_id=event_id)
-
-
 def _sse_for_event(event: Dict[str, Any], event_id: Optional[int] = None) -> str:
+    """将内部事件转换为既有 SSE 格式，保留各事件的字段与可选 event 名称。"""
     event_type = str(event.get("type") or "")
 
     if event_type == "delta":
-        return _build_numbered_sse(
+        return build_sse_event(
             {
                 "type": "delta",
                 "delta": str(event.get("delta") or ""),
                 "index": int(event.get("index") or 0),
             },
-            event_id,
+            event_id=event_id,
         )
 
     if event_type == "done":
@@ -119,7 +118,7 @@ def _sse_for_event(event: Dict[str, Any], event_id: Optional[int] = None) -> str
         }
         if isinstance(meta, dict):
             payload["meta"] = meta
-        return _build_numbered_sse(payload, event_id)
+        return build_sse_event(payload, event_id=event_id)
 
     if event_type == "error":
         payload = {
@@ -128,21 +127,22 @@ def _sse_for_event(event: Dict[str, Any], event_id: Optional[int] = None) -> str
             "message": str(event.get("message") or "agent stream error"),
             "data": event.get("data"),
         }
-        return _build_numbered_sse(
+        return build_sse_event(
             payload,
-            event_id,
+            event_id=event_id,
         )
 
     if event_type in AGENT_EVENT_TYPES:
-        return _build_numbered_sse(event, event_id, event=event_type)
+        return build_sse_event(event, event=event_type, event_id=event_id)
 
-    return _build_numbered_sse(event, event_id)
+    return build_sse_event(event, event_id=event_id)
 
 
 def _append_event(
     state: _AgentStreamState,
     event: Dict[str, Any],
 ) -> _BufferedAgentEvent:
+    """先分配递增编号并缓存事件，再通知在线订阅者，确保断线期间也能积累续传数据。"""
     now = time.monotonic()
     with state.lock:
         record = _BufferedAgentEvent(
@@ -165,6 +165,7 @@ def _subscribe(
     state: _AgentStreamState,
     last_event_id: int,
 ) -> Tuple[Optional[asyncio.Queue], List[_BufferedAgentEvent]]:
+    """在同一把锁内获取历史和注册订阅，避免重放与实时接收之间漏掉事件。"""
     queue: asyncio.Queue = asyncio.Queue()
     with state.lock:
         replay = [
@@ -186,6 +187,7 @@ def _unsubscribe(state: _AgentStreamState, queue: Optional[asyncio.Queue]) -> No
 
 
 async def _run_agent_task(state: _AgentStreamState) -> None:
+    """创建消息并运行 Agent；工具事件实时缓存，最终答案和引用保存后再发送结束事件。"""
     started_at = time.perf_counter()
 
     async def emit(event: Dict[str, Any]) -> None:
@@ -212,6 +214,7 @@ async def _run_agent_task(state: _AgentStreamState) -> None:
             event_sink=emit,
         )
 
+        # Agent 编排返回的是业务结果；这里补齐消息和引用持久化，失败时不能发送 done。
         assistant_message = create_message(
             session_id=state.session_id,
             role="assistant",
@@ -258,6 +261,7 @@ async def _run_agent_task(state: _AgentStreamState) -> None:
             "routing": result.get("routing") or {},
         }
 
+        # 当前 Agent 的回答以完整文本 delta 发送，实时工具 Trace 不代表逐 token 生成。
         if result["answer"]:
             await emit({"type": "delta", "delta": result["answer"], "index": 1})
 
@@ -290,6 +294,7 @@ def _get_or_start_stream_state(
     trace_id: Optional[str],
     last_event_id: Optional[str],
 ) -> _AgentStreamState:
+    """复用活跃流或续传缓存；只有没有续传标记的新请求才能启动新的业务运行。"""
     key = _stream_key(session_id, message, trace_id)
     now = time.monotonic()
     with _STREAMS_LOCK:
@@ -302,6 +307,7 @@ def _get_or_start_stream_state(
                 return existing
 
         if resume_requested(last_event_id):
+            # 缓存可能因过期、数量淘汰或进程重启丢失；明确报错，不能重新分类和生成。
             state = _AgentStreamState(
                 key=key,
                 session_id=session_id,
@@ -341,6 +347,7 @@ async def stream_agent_chat(
     trace_id: Optional[str] = None,
     last_event_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
+    """订阅缓存和实时队列；连接关闭只取消订阅，不取消独立创建的生成 task。"""
     state = _get_or_start_stream_state(
         session_id=session_id,
         message=message,

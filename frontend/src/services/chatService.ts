@@ -1,3 +1,4 @@
+/** 会话请求与 SSE 客户端：解析事件、分发业务回调，并在已有运行上恢复断开的连接。 */
 import { joinUrl, requestEnvelope } from "./apiClient";
 import type { ChatMessage } from "../types/message";
 import type { ChatSubmitData, MessageListData, Session } from "../types/session";
@@ -169,9 +170,11 @@ function appendDecodedText(
   chunk: Uint8Array,
   decoder: TextDecoder,
 ): string {
+  // 一个网络分片可能截断 UTF-8 字符或 CRLF；持续使用同一个 decoder 和累积缓冲。
   return (current + decoder.decode(chunk, { stream: true })).replace(/\r\n/g, "\n");
 }
 
+/** 解析一条完整 SSE；先通知传输观察者，再触发对应的回答或 Agent 回调。 */
 function processSseEvent(
   rawEvent: string,
   callbacks: StreamChatCallbacks,
@@ -206,6 +209,7 @@ function processSseEvent(
   };
   const type = payload.type || eventName;
   const nextEventId = eventId || (payload.event_id === undefined ? null : String(payload.event_id));
+  // 收到恢复后的首个编号事件才宣布续传成功，并且先于该事件的其他回调。
   beforeDispatch?.(nextEventId);
   callbacks.onTransportEvent?.({
     type: type || "message",
@@ -250,6 +254,7 @@ function processSseEvent(
   return { done: false, eventId: nextEventId };
 }
 
+/** 同一请求的连接循环；只有获得续传游标及稳定请求标识后，断线才允许重连。 */
 async function streamSse(
   baseUrl: string,
   path: string,
@@ -257,6 +262,7 @@ async function streamSse(
   callbacks: StreamChatCallbacks = {},
   options: StreamSseOptions = {},
 ): Promise<void> {
+  // 默认最多重连 3 次，计数覆盖整个请求，不会在成功连接后清零。
   const maxResumeAttempts = options.maxResumeAttempts ?? 3;
   let resumeAttempts = 0;
   let lastEventId: string | null = null;
@@ -332,6 +338,15 @@ async function streamSse(
     let sawDone = false;
     let readFailed = false;
 
+    // 完整事件和 EOF 前的最后一段缓冲使用相同处理，避免遗漏游标或结束状态更新。
+    const consumeEvent = (rawEvent: string) => {
+      const processed = processSseEvent(rawEvent, callbacks, announceResumed);
+      if (processed.eventId) {
+        lastEventId = processed.eventId;
+      }
+      sawDone = processed.done || sawDone;
+    };
+
     while (true) {
       let result: ReadableStreamReadResult<Uint8Array>;
       try {
@@ -349,26 +364,20 @@ async function streamSse(
       }
 
       buffer = appendDecodedText(buffer, result.value, decoder);
+      // 网络 chunk 与 SSE event 没有一一对应关系；只分发空行结束的完整事件。
       const events = buffer.split("\n\n");
       buffer = events.pop() || "";
 
       for (const rawEvent of events) {
-        const processed = processSseEvent(rawEvent, callbacks, announceResumed);
-        if (processed.eventId) {
-          lastEventId = processed.eventId;
-        }
-        sawDone = processed.done || sawDone;
+        consumeEvent(rawEvent);
       }
     }
 
     if (!readFailed && buffer.trim()) {
-      const processed = processSseEvent(buffer.trim(), callbacks, announceResumed);
-      if (processed.eventId) {
-        lastEventId = processed.eventId;
-      }
-      sawDone = processed.done || sawDone;
+      consumeEvent(buffer.trim());
     }
 
+    // EOF 只表示连接关闭；没有业务 done 时必须续传或报告失败，不能当作回答完成。
     if (sawDone) {
       return;
     }
@@ -381,6 +390,7 @@ async function streamSse(
   }
 }
 
+/** 普通 Chat 首次发送正文；拿到网关保存的消息 ID 后，续传改为订阅同一条消息。 */
 export async function streamChat(
   baseUrl: string,
   request: StreamChatRequest,
@@ -410,6 +420,7 @@ export async function streamChat(
           ...(initialRequest as Record<string, unknown>),
           user_message_id: userMessageId,
         };
+        // 续传用已有消息 ID 表达订阅意图；移除仅在首次提交时需要的正文。
         delete resumeRequest.content;
         return resumeRequest;
       },
@@ -417,6 +428,7 @@ export async function streamChat(
   );
 }
 
+/** Agent 续传保留 message 与 trace_id，由后端用稳定运行标识复用生成任务。 */
 export async function streamAgentChat(
   baseUrl: string,
   request: AgentChatStreamRequest,

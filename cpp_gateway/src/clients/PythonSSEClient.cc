@@ -12,6 +12,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 struct CurlWriteContext {
+    // 每次上游连接的状态；接收 HTTP 头后才能决定正文是否可以作为 SSE 转发。
     PythonSSEClient::ChunkCallback onChunk;
     Clock::time_point startedAt{Clock::now()};
     long responseCode{0};
@@ -36,6 +37,7 @@ std::string buildGatewayMetricsEvent(long long ttftMs) {
 }
 
 bool shouldSuppressBody(const CurlWriteContext* ctx) {
+    // 上游 HTTP 错误正文可能是普通 JSON，统一留给完成回调转换成 SSE error。
     return ctx && ctx->responseCode >= 400;
 }
 
@@ -77,7 +79,8 @@ size_t writeCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     }
 
     if (!sendChunk(ctx, std::string(ptr, total))) {
-        return 0;  // Stop curl when the downstream client is gone.
+        // 结束已无订阅者的网关代理连接；这不会取消 Python 已经启动的独立生成。
+        return 0;
     }
 
     return total;
@@ -169,6 +172,7 @@ void PythonSSEClient::postStream(
     const FinishCallback& onFinish,
     const std::string& lastEventId
 ) const {
+    // 此方法在代理线程中同步消费 curl 数据，chunk 回调只负责转发，不解析业务事件。
     ensureCurlGlobalInit();
 
     const std::string url = joinUrl(baseUrl_, path);
@@ -214,6 +218,7 @@ void PythonSSEClient::postStream(
     curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
 
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, config_.connectTimeoutSeconds);
+    // 不限制生成总时长，改用低速/空闲超时检测失去响应的上游连接。
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, config_.upstreamLowSpeedLimitBytesPerSecond);
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, config_.upstreamIdleTimeoutSeconds);

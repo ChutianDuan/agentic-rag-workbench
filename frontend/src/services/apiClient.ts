@@ -1,3 +1,4 @@
+/** 非 SSE 请求共用的传输层：处理 HTTP 错误，再按项目响应外壳检查业务错误。 */
 import type { ApiEnvelope } from "../types/api";
 
 export function joinUrl(baseUrl: string, path: string): string {
@@ -65,6 +66,7 @@ export async function requestEnvelope<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
+  // HTTP 成功不代表业务成功；只有 code=0 时才把 data 交给页面或业务客户端。
   const payload = await requestJson<ApiEnvelope<T>>(baseUrl, path, init);
   if (payload.code !== 0) {
     throw new Error(payload.message || `api error ${payload.code}`);

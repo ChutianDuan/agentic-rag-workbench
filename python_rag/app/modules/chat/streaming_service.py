@@ -1,3 +1,5 @@
+"""普通 RAG 生成流程：校验消息、检索证据、组装上下文、流式生成并持久化最终结果。"""
+
 import logging
 import time
 from typing import Dict, Generator, List, Optional
@@ -91,6 +93,7 @@ def stream_chat_for_message(
     top_k: Optional[int] = None,
     doc_ids: Optional[List[int]] = None,
 ) -> Generator[str, None, None]:
+    """为已存在的 user message 生成未编号事件；外层续传模块负责后台执行与事件编号。"""
     top_k = top_k or CHAT_TOP_K
     doc_ids = doc_ids or []
     started_at = time.perf_counter()
@@ -121,6 +124,7 @@ def stream_chat_for_message(
 
             update_message_status(user_message_id, "PROCESSING")
 
+            # 普通 RAG 始终先检索；是否绕过检索的轻量路由只应用于 Agent 入口。
             retrieval_result = _retrieve_hits(
                 question=question,
                 doc_id=doc_id,
@@ -176,6 +180,7 @@ def stream_chat_for_message(
             stream_index = 0
 
             if context_mode == "no_context":
+                # 缺少知识库证据时给出明确说明，不用模型的通用知识填补文档结论。
                 answer_source = "no_context"
                 for delta_text in _stream_fallback_answer(NO_CONTEXT_ANSWER):
                     stream_index += 1
@@ -249,6 +254,7 @@ def stream_chat_for_message(
             )
 
             e2e_latency_ms = int((time.perf_counter() - started_at) * 1000)
+            # 模型的 done 只表示生成结束；业务 done 必须等消息和 citations 全部保存成功。
             assistant_message = persist_stream_result(
                 session_id=session_id,
                 answer_text=answer_text,

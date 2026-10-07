@@ -29,6 +29,7 @@ bool isDownstreamClosedError(const std::string& message) {
 }  // namespace
 
 struct StreamChatService::StreamSlotLease {
+    // 槽位随最后一个持有者释放，覆盖响应创建、后台代理和提前失败等不同退出路径。
     explicit StreamSlotLease(std::shared_ptr<std::atomic<int>> activeStreams)
         : activeStreams_(std::move(activeStreams)) {}
 
@@ -152,7 +153,18 @@ HttpResponsePtr StreamChatService::buildJsonErrorResponse(
     return resp;
 }
 
+HttpResponsePtr StreamChatService::buildStreamLimitResponse() {
+    auto resp = buildJsonErrorResponse(
+        4290,
+        "too many active streams",
+        k429TooManyRequests
+    );
+    resp->addHeader("Retry-After", "1");
+    return resp;
+}
+
 std::shared_ptr<StreamChatService::StreamSlotLease> StreamChatService::acquireStreamSlot() const {
+    // 用原子比较交换同时检查和占用槽位，避免多个请求越过并发上限。
     int current = activeStreams_->load();
     while (current < maxConcurrentStreams_) {
         if (activeStreams_->compare_exchange_weak(current, current + 1)) {
@@ -170,6 +182,7 @@ void StreamChatService::startStreamResponse(
     std::shared_ptr<StreamSlotLease> streamSlot,
     std::function<void(const HttpResponsePtr&)>&& callback
 ) {
+    // 响应与代理线程接力持有租约，线程退出时自动归还槽位；回调中的资源必须跨异步边界存活。
     auto resp = HttpResponse::newAsyncStreamResponse(
         [
             client = pythonSSEClient_,
@@ -203,6 +216,7 @@ void StreamChatService::startStreamResponse(
                         [sharedStream](bool ok, long httpCode, const std::string& errorMessage) mutable {
                             if (!ok) {
                                 if (isDownstreamClosedError(errorMessage)) {
+                                    // 客户端已断开，无法再发送 error；Python 的独立生成任务仍可继续。
                                     LOG_DEBUG << "SSE downstream closed before upstream completed";
                                     sharedStream->close();
                                     return;
@@ -269,17 +283,12 @@ void StreamChatService::handleStream(
 
     auto streamSlot = acquireStreamSlot();
     if (!streamSlot) {
-        auto resp = buildJsonErrorResponse(
-            4290,
-            "too many active streams",
-            k429TooManyRequests
-        );
-        resp->addHeader("Retry-After", "1");
-        callback(resp);
+        callback(buildStreamLimitResponse());
         return;
     }
 
     if (body.isMember("user_message_id") && body["user_message_id"].isInt()) {
+        // 已有消息 ID 的请求直接订阅后台流，Last-Event-ID 决定从哪条事件之后续传。
         startStreamResponse(
             body,
             "/internal/chat/stream",
@@ -298,6 +307,7 @@ void StreamChatService::handleStream(
     createMessageBody["content"] = body["content"].asString();
     createMessageBody["status"] = "PENDING";
 
+    // 首次 Chat 先通过 Python 保存用户消息，再以返回的 ID 发起流，重连时不重复保存正文。
     const int sessionId = body["session_id"].asInt();
     pythonApiClient_->forwardJsonPost(
         "/internal/sessions/" + std::to_string(sessionId) + "/messages",
@@ -363,16 +373,11 @@ void StreamChatService::handleAgentStream(
 
     auto streamSlot = acquireStreamSlot();
     if (!streamSlot) {
-        auto resp = buildJsonErrorResponse(
-            4290,
-            "too many active streams",
-            k429TooManyRequests
-        );
-        resp->addHeader("Retry-After", "1");
-        callback(resp);
+        callback(buildStreamLimitResponse());
         return;
     }
 
+    // Agent 由后端创建消息并按 trace_id 识别运行；网关原样保留问题和续传头。
     body["stream"] = true;
     startStreamResponse(
         body,

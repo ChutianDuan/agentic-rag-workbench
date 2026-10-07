@@ -1,3 +1,5 @@
+"""检索意图入口：明确问题走规则，歧义问题交给轻量模型，分类失败交回 Agent。"""
+
 import asyncio
 import json
 import logging
@@ -58,6 +60,8 @@ _METADATA_HINT_RE = re.compile(
 
 @dataclass(frozen=True)
 class RouteDecision:
+    """保存路线及其诊断信息；route 控制检索权限，不选择最终回答模型。"""
+
     route: Literal["rag", "agent", "fallback"]
     source: Literal["rule", "model", "fallback"]
     reason: str
@@ -70,13 +74,16 @@ class RouteDecision:
 
 
 def match_routing_rule(question: str) -> Optional[RouteDecision]:
+    """仅根据当前问题匹配明确意图；返回 None 表示需要结合上下文做模型分类。"""
     normalized = " ".join(str(question or "").strip().lower().split())
     normalized = normalized.rstrip("。.!！?？~～ ")
+    # 问候和元数据查询必须整句匹配，避免忽略同一句中的其他业务要求。
     if _GREETING_RE.fullmatch(normalized):
         return RouteDecision("agent", "rule", "greeting")
     if any(pattern.fullmatch(normalized) for pattern in _METADATA_PATTERNS):
         return RouteDecision("agent", "rule", "metadata_query")
     if _METADATA_HINT_RE.search(normalized):
+        # 混合查询优先交给模型，不能因为同时提到文档就直接归入证据规则。
         return None
     if _EVIDENCE_RE.search(normalized):
         return RouteDecision("rag", "rule", KNOWLEDGE_SEARCH_ROUTER_REASON)
@@ -87,6 +94,7 @@ def build_routing_messages(
     question: str,
     memory: Optional[SessionMemory] = None,
 ) -> List[Dict[str, str]]:
+    """给分类器提供问题、有限历史和摘要；长期用户记忆不参与这次判断。"""
     history = []
     remaining_chars = 2000
     if memory is not None:
@@ -115,6 +123,7 @@ async def route_question(
     memory: Optional[SessionMemory] = None,
     llm_service_module: Any = llm_service,
 ) -> RouteDecision:
+    """每次新运行至多分类一次，输出非法或请求失败时返回可诊断的 fallback。"""
     decision = match_routing_rule(question)
     if decision is not None:
         return decision
@@ -125,6 +134,7 @@ async def route_question(
     try:
         if llm_service_module.ROUTER_LLM_TIMEOUT_SECONDS <= 0:
             raise ValueError("invalid router timeout")
+        # requests 是同步调用，移到线程执行；超时只结束等待，无法撤回已发出的 HTTP 请求。
         result = await asyncio.wait_for(
             asyncio.to_thread(
                 llm_service_module.generate_routing_decision,
@@ -132,6 +142,7 @@ async def route_question(
             ),
             timeout=llm_service_module.ROUTER_LLM_TIMEOUT_SECONDS,
         )
+        # 这是生成后的语法和字段校验，不是推理时的 JSON 约束，也不保证分类语义正确。
         payload = json.loads(result["answer"])
         if (
             not isinstance(payload, dict)
@@ -181,6 +192,7 @@ def should_force_knowledge_search(question: str) -> bool:
 
 
 def build_forced_knowledge_search_tool_call(question: str) -> Dict[str, Any]:
+    """把后端指定的首次检索包装成标准工具调用，以复用权限、超时和 Trace 处理。"""
     return {
         "id": "forced_knowledge_search_0",
         "type": "function",

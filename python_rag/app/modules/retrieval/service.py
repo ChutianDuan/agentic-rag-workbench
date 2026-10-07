@@ -1,3 +1,5 @@
+"""共用检索链路：限制就绪文档、向量召回、MySQL 补正文、可选重排及指标汇总。"""
+
 import math
 import json
 import time
@@ -24,14 +26,12 @@ from python_rag.app.modules.monitor.request_metrics import (
     is_timeout_error,
     record_request_metric,
 )
-from python_rag.app.modules.retrieval.bm25_service import search_doc_bm25_index
-from python_rag.app.modules.retrieval.faiss_service import search_doc_faiss_index
 from python_rag.app.modules.retrieval.lancedb_service import search_lancedb_index
-from python_rag.app.modules.retrieval.fusion_service import fuse_hits_with_rrf
 from python_rag.app.modules.retrieval.reranker_service import rerank_hits
 
 
 def _normalize_recall_provider():
+    """保留旧配置值兼容，但当前在线检索统一使用 LanceDB；独立旧检索模块仍供实验使用。"""
     provider = (RETRIEVAL_RECALL_PROVIDER or "lancedb").strip().lower()
     if provider in ("lancedb", "lance", "vector", "dense"):
         return "lancedb"
@@ -226,33 +226,6 @@ def _expand_hits_with_neighbor_context(hits, index_metas):
         "failed_doc_ids": sorted(set(failed_doc_ids)),
     }
 
-def _format_faiss_hit(item):
-    content = item.get("content", "")
-    score = round(float(item["score"]), 6)
-    return {
-        "doc_id": item["doc_id"],
-        "chunk_id": item["chunk_id"],
-        "chunk_index": item["chunk_index"],
-        "score": score,
-        "faiss_score": score,
-        "content": content,
-        "snippet": _build_snippet(content),
-    }
-
-
-def _format_bm25_hit(item):
-    content = item.get("content", "")
-    score = round(float(item["bm25_score"]), 6)
-    return {
-        "doc_id": item["doc_id"],
-        "chunk_id": item["chunk_id"],
-        "chunk_index": item["chunk_index"],
-        "score": score,
-        "bm25_score": score,
-        "content": content,
-        "snippet": _build_snippet(content),
-    }
-
 
 def _format_lancedb_hit(item, chunk_row):
     content = chunk_row.get("content") or chunk_row.get("text") or ""
@@ -272,6 +245,7 @@ def _format_lancedb_hit(item, chunk_row):
 
 
 def _hydrate_lancedb_hits(lancedb_hits):
+    """按召回 ID 批量读取 MySQL 正文，保持召回顺序；已删除或无法对应的 chunk 不进入证据。"""
     if not lancedb_hits:
         return []
 
@@ -402,6 +376,7 @@ def search_in_documents(
     relevant_chunk_ids=None,
     relevant_chunk_indexes=None,
 ):
+    """返回指定文档范围内的命中及阶段指标；未指定范围时搜索全部可用的就绪文档。"""
     started_at = time.perf_counter()
     embedding_ms = None
     lancedb_ms = None
@@ -429,6 +404,7 @@ def search_in_documents(
             user_id=user_id,
             embedding_model=current_embedding_model,
         )
+        # 只检索就绪且 embedding 模型匹配的索引，避免不同向量空间混用。
         for resolved_doc_id in resolved_doc_ids:
             _load_ready_index_meta(resolved_doc_id, current_embedding_model)
 
@@ -442,11 +418,13 @@ def search_in_documents(
             top_k=effective_candidate_top_k,
             doc_ids=resolved_doc_ids,
         )
+        # LanceDB 提供候选和分数，正文始终从 MySQL 补齐，避免索引中的旧正文成为事实来源。
         candidate_hits = _hydrate_lancedb_hits(lancedb_hits)
         lancedb_ms = int((time.perf_counter() - lancedb_started_at) * 1000)
         _rank_source_hits(candidate_hits, "lancedb_score", "lancedb_rank")
 
         rerank_started_at = time.perf_counter()
+        # 重排是否执行由 reranker 模块按配置决定；保留召回分数和 rank 便于回查。
         result_hits, rerank_meta = rerank_hits(
             query=query,
             hits=candidate_hits,

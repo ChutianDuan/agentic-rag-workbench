@@ -1,3 +1,5 @@
+"""普通 Chat 的进程内续传缓存：后台线程生成，HTTP 连接按事件编号读取。"""
+
 import logging
 import time
 from dataclasses import dataclass, field
@@ -27,6 +29,8 @@ StreamKey = Tuple[int, int, Optional[int], Tuple[int, ...], int]
 
 @dataclass
 class _ChatStreamState:
+    """保存同一次请求的编号事件；Condition 协调生产线程与一个或多个连接读取者。"""
+
     key: StreamKey
     created_at: float
     updated_at: float
@@ -51,6 +55,7 @@ def _stream_key(
 
 
 def _append_event(state: _ChatStreamState, raw_event: str) -> None:
+    """在锁内完成编号、缓存和通知，保证重连读到连续且不会重复生成的事件。"""
     with state.condition:
         event_id = state.next_event_id
         numbered_event = add_sse_event_id(raw_event, event_id)
@@ -77,6 +82,7 @@ def _run_stream(
     top_k: int,
     doc_ids: List[int],
 ) -> None:
+    """独立消费业务生成器；即使没有客户端订阅，也继续生成、落库并缓存终止事件。"""
     terminal_emitted = False
     try:
         for raw_event in stream_chat_for_message(
@@ -107,6 +113,7 @@ def _run_stream(
 
 
 def _cleanup_stream_registry(now: float) -> None:
+    """仅淘汰已经完成的流，活跃生成不受完成缓存的 TTL 和数量上限影响。"""
     expired = [
         key
         for key, state in _STREAMS.items()
@@ -143,6 +150,7 @@ def _get_or_start_stream_state(
     doc_ids: List[int],
     last_event_id: Optional[str],
 ) -> _ChatStreamState:
+    """依据消息 ID 和检索参数复用流；续传状态不存在时返回错误，禁止重新启动。"""
     key = _stream_key(session_id, user_message_id, doc_id, doc_ids, top_k)
     now = time.monotonic()
     with _STREAMS_LOCK:
@@ -186,6 +194,7 @@ def stream_resumable_chat(
     doc_ids: Optional[List[int]] = None,
     last_event_id: Optional[str] = None,
 ) -> Generator[str, None, None]:
+    """从 Last-Event-ID 之后读取缓存，等待新事件时发送心跳；连接与生产线程分别存活。"""
     normalized_doc_ids = list(doc_ids or [])
     state = _get_or_start_stream_state(
         session_id=session_id,
@@ -216,6 +225,7 @@ def stream_resumable_chat(
             yield build_sse_comment()
             continue
 
+        # 释放状态锁后再向连接发送，避免客户端读取速度阻塞后台生成线程写入缓存。
         for event_id, raw_event in pending:
             cursor = event_id
             yield raw_event

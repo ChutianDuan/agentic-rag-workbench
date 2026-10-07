@@ -1,3 +1,5 @@
+"""普通 Chat 的 SSE 入口；生成和续传生命周期由业务模块管理。"""
+
 from typing import Optional
 
 from fastapi import APIRouter, Header
@@ -14,6 +16,7 @@ def chat_stream(
     req: ChatStreamRequest,
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
 ):
+    """用稳定 user_message_id 和 Last-Event-ID 订阅已有生成或启动首次生成。"""
     generator = stream_resumable_chat(
         session_id=req.session_id,
         doc_id=req.doc_id,

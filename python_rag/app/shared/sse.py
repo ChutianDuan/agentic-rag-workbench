@@ -1,3 +1,5 @@
+"""无业务状态的 SSE 编解码工具；事件生命周期和缓存由各业务模块管理。"""
+
 import json
 from typing import Any, Dict, Optional
 
@@ -20,6 +22,7 @@ def build_sse_event(
     event: Optional[str] = None,
     event_id: Optional[int] = None,
 ) -> str:
+    """序列化一个事件；编号同时写入 SSE id 和 JSON event_id，方便客户端观测与续传。"""
     payload = dict(data)
     lines = []
     if event_id is not None:
@@ -32,11 +35,12 @@ def build_sse_event(
 
 
 def build_sse_comment(comment: str = "keep-alive") -> str:
+    """心跳使用 SSE 注释，不分配事件编号，也不推进客户端的续传游标。"""
     return ": {0}\n\n".format(comment.replace("\n", " "))
 
 
 def add_sse_event_id(raw_event: str, event_id: int) -> str:
-    """Add an SSE id and mirror it in a JSON data payload."""
+    """为业务层生成的原始事件补编号；JSON 对象中的 event_id 与 SSE id 保持一致。"""
     event_name = None
     data_lines = []
     for line in raw_event.replace("\r\n", "\n").splitlines():

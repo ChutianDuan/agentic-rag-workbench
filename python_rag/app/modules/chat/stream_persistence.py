@@ -1,3 +1,5 @@
+"""普通 Chat 流的最终落库边界：保存回答及其引用后，调用方才能发送业务 done。"""
+
 from typing import Any, Dict, List
 
 from python_rag.app.modules.chat.common import build_citations_from_hits
@@ -14,10 +16,9 @@ def persist_stream_result(
     extra_meta: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """
-    在 stream done 前调用：
-    1. 保存 assistant message
-    2. 保存 citations
-    3. 返回 assistant message 信息
+    保存回答及检索引用，返回可用于结束事件的 assistant message 信息。
+
+    引用保存失败时异常继续向上传播，不能把部分完成的落库过程报告成成功流。
     """
 
     meta = {

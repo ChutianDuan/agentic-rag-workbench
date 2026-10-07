@@ -1,3 +1,5 @@
+"""文档 HTTP 入口：保存资料、查询元数据及按需提交异步入库，不在请求内计算向量。"""
+
 from fastapi import APIRouter, File, Form, Query, UploadFile
 
 from python_rag.app.core.logger import logger
@@ -26,6 +28,7 @@ def upload_document(
 
 
 def _with_ingest_job(document_result: dict):
+    """给已保存的文档追加入库任务；派发失败时尝试删除文档，避免留下未入队的资料。"""
     doc_id = int(document_result["doc_id"])
     try:
         ingest_job = submit_ingest_job(doc_id)
