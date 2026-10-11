@@ -10,6 +10,12 @@ cd "$REPO_ROOT"
 source "${REPO_ROOT}/scripts/env.sh"
 load_dotenv "${REPO_ROOT}/.env"
 
+GATEWAY_BUILD_DIR="${GATEWAY_BUILD_DIR:-${REPO_ROOT}/cpp_gateway/build}"
+if [[ "$GATEWAY_BUILD_DIR" != /* ]]; then
+  GATEWAY_BUILD_DIR="${REPO_ROOT}/${GATEWAY_BUILD_DIR}"
+fi
+export GATEWAY_BUILD_DIR
+
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
 START_FRONTEND="${START_FRONTEND:-false}"
@@ -194,7 +200,7 @@ status_service() {
 }
 
 ensure_gateway_binary() {
-  if [ -x "${REPO_ROOT}/cpp_gateway/build/cpp_gateway" ]; then
+  if [ -x "${GATEWAY_BUILD_DIR}/cpp_gateway" ]; then
     return 0
   fi
 
@@ -213,10 +219,10 @@ ensure_gateway_binary() {
   if [ -n "${Drogon_DIR:-}" ]; then
     cmake_args+=("-DDrogon_DIR=${Drogon_DIR}")
   fi
-  cmake -S cpp_gateway -B cpp_gateway/build \
+  cmake -S cpp_gateway -B "$GATEWAY_BUILD_DIR" \
     -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Debug}" \
     "${cmake_args[@]}"
-  cmake --build cpp_gateway/build -j "${BUILD_JOBS:-4}"
+  cmake --build "$GATEWAY_BUILD_DIR" -j "${BUILD_JOBS:-4}"
 }
 
 start_named() {

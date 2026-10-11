@@ -6,6 +6,21 @@
 
 这篇文章不按配置文件顺序罗列变量，而是先建立进程模型，再给出一条由外向内的排障路径。
 
+## 章节导航
+
+- [先分清哪些进程参与当前请求](#先分清哪些进程参与当前请求)
+- [为什么 Python 环境要拆开](#为什么-python-环境要拆开)
+- [MySQL 认证与 Gateway 依赖](#mysql-认证与-gateway-依赖)
+- [配置分三层理解](#配置分三层理解)
+- [GPU 分配：先隔离，再谈利用率](#gpu-分配先隔离再谈利用率)
+- [推荐启动顺序](#推荐启动顺序)
+- [初始化后的表结构检查](#初始化后的表结构检查)
+- [启动后的最小验收](#启动后的最小验收)
+- [健康检查要分层阅读](#健康检查要分层阅读)
+- [流式请求卡住时，从外向内定位](#流式请求卡住时从外向内定位)
+- [代理为什么会影响本地调用](#代理为什么会影响本地调用)
+- [常见问题](#常见问题)
+
 ## 先分清哪些进程参与当前请求
 
 | 组件 | 默认地址 | 推荐管理方式 | 当前职责 |
@@ -58,6 +73,20 @@ source .venv/bin/activate
 pip install -r python_rag/requirements.txt
 pip install -r python_rag/requirements-dev.txt
 ```
+
+## MySQL 认证与 Gateway 依赖
+
+Python 依赖使用 `PyMySQL[rsa]`，会安装 MySQL 8 的 `caching_sha2_password` / `sha256_password` 认证所需的 `cryptography`。已有 `rag-api` 环境可通过 `python -m pip install -r python_rag/requirements.txt` 补齐，再用 `python -m pip check` 检查依赖。
+
+Gateway 使用的 Drogon 必须启用 MySQL 和 Redis 支持。vcpkg 对应的 feature 是 `drogon[mysql,redis]`；从源码构建时需开启 `BUILD_ORM=ON`、`BUILD_MYSQL=ON`、`BUILD_REDIS=ON`，并提供 MariaDB 客户端和 hiredis 开发库。只有基础 HTTP 功能的 Drogon 可以让 Gateway 编译成功，但启动时会报 `No database is supported by drogon`。
+
+使用单独的构建目录时，将其传给启动脚本；相对路径从仓库根目录解析：
+
+```bash
+GATEWAY_BUILD_DIR=/path/to/gateway-build START_FRONTEND=true bash scripts/start_all.sh start
+```
+
+默认目录仍是 `cpp_gateway/build`。单独启动 Gateway 的 `cpp_gateway/scripts/start_gateway.sh` 也支持同一变量。
 
 ## 配置分三层理解
 
@@ -187,6 +216,46 @@ bash scripts/start_worker.sh
 bash cpp_gateway/scripts/start_gateway.sh
 ```
 
+## 初始化后的表结构检查
+
+`scripts/init_db.sh` 执行基础表定义，再扫描 `db/*_schema_upgrade.sql` 和可选的 `db/migrations/*.sql`。它不会自动扫描所有 `db/*.sql`。Agent 表定义文件 `db/004_create_agent_tables.sql` 不匹配当前扫描规则，因此“初始化脚本执行成功”不能证明 Agent Trace 表已创建。
+
+在实际目标数据库中执行以下只读检查：
+
+```sql
+SHOW TABLES LIKE 'agent_%';
+SHOW COLUMNS FROM documents LIKE 'index_status';
+SHOW COLUMNS FROM doc_chunks LIKE 'embedding_status';
+SHOW COLUMNS FROM doc_chunks LIKE 'vector_index_status';
+SHOW TABLES LIKE 'request_metrics';
+SHOW TABLES LIKE 'vector_index_jobs';
+```
+
+Agent 需要 `agent_runs`、`agent_steps` 和 `agent_tool_calls`。缺少这三张表时，应在目标库执行 [Agent 建表 SQL](../db/004_create_agent_tables.sql)；索引状态字段与作业表分别对照 [索引状态升级](../db/006_lancedb_index_status.sql)和[索引作业表](../db/007_create_vector_index_jobs.sql)。已有数据库的实际字段及约束以查询结果为准，不根据文档关系图推断迁移已经完成。
+
+## 启动后的最小验收
+
+| 检查 | 操作 / 观察入口 | 成功依据 |
+| --- | --- | --- |
+| 进程与 HTTP | `bash scripts/start_all.sh status` | API、Gateway 进程与 HTTP 均可达；Worker 状态单独查看 |
+| 依赖连接 | Gateway `/health`、FastAPI `/internal/health` | 检查各依赖的实际状态，区分降级与完全可用 |
+| 模型入口 | `${LLM_BASE_URL}/models` | 当前凭据可访问，配置模型可用；列表响应尚不证明生成成功 |
+| 入库链路 | 上传一份小文档，查询父 / 子 task 和文档详情 | 解析与向量化完成，`index_status=indexed` |
+| 普通 RAG | `/v1/chat/stream` | 收到终止 `done`，消息接口可查到对应 assistant 和 citations |
+| Agent | `/v1/agent/chat/stream` | 路由与工具事件符合问题，`final`、`done` 到达，run / steps 可回查 |
+| 前端 | Workbench 与浏览器 Network | 使用真实 Gateway 响应，错误与引用能显示 |
+
+最后四项会创建业务记录并可能调用模型；执行时使用小文档和实际返回的 ID。已有 indexed 文档与会话时可直接复用。完整示例见[演示案例](demo_cases.md)，两阶段轮询与 SSE 重连见 [API 契约](api_agent.md)。
+
+索引问题可以先通过只读内部接口检查：
+
+```bash
+curl 'http://127.0.0.1:8000/internal/lancedb/status?doc_id=12'
+curl 'http://127.0.0.1:8000/internal/lancedb/capacity?document_sample_limit=20'
+```
+
+将 `12` 替换为实际文档 ID。这些接口提供索引状态与容量信息；不能代替一次真实检索对 embedding、召回和 MySQL 回表的验证。
+
 ## 健康检查要分层阅读
 
 ```bash
@@ -266,7 +335,11 @@ Gateway health 不检查 vLLM。分别验证 `/health` 和 `${LLM_BASE_URL}/mode
 
 ### SSE 断线后出现重复消息
 
-普通 Chat 续传必须复用 Gateway 返回的 `X-User-Message-ID`，并携带 Last-Event-ID；Agent 续传必须复用同一 `trace_id`。如果自定义客户端重发原始 `content`，会有重复创建消息的风险。
+普通 Chat 续传必须复用 Gateway 返回的 `X-User-Message-ID`，保持 `doc_id`、`doc_ids` 顺序与 `top_k`，并携带 Last-Event-ID；Agent 续传必须复用同一 `trace_id`。如果自定义客户端省略消息 ID、只重发原始 `content`，会创建新消息。
+
+### SSE 返回 `stream resume state expired`
+
+先核对运行标识、检索参数和 Last-Event-ID；再检查 API 是否重启、是否切换 API 进程，或完成缓存是否超过 15 分钟 / 128 条上限。状态丢失时系统明确失败。可先查询原会话的 messages，以及已知 `run_id` 的 Trace，确认原答案是否保存；需要重新提问时使用新运行标识。完整规则见 [SSE 续传与失败处理](api_agent.md#sse-续传与失败处理)。
 
 ### 修改 `.env` 后仍像旧配置
 

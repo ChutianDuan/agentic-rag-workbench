@@ -1,48 +1,75 @@
-# 从哪里开始读：RAG Gateway Stack 文档地图
+# RAG Gateway Stack 文档导航
 
-`docs/` 不是根 README 的重复版本。根 README 负责讲清整个系统为什么这样设计；这里把架构、接口、运行、验证和历史证据拆成可以独立阅读的技术文章。
+[返回项目首页](../README.md)
 
-## 按问题选择文档
+根 README 介绍整体架构与执行链；本目录提供运行、接口、设计、验证和实验的专题说明。各文档保留原文件名和位置，便于沿用已有链接。
 
-| 你现在想解决的问题 | 建议阅读 |
+## 快速开始
+
+| 目标 | 阅读顺序 |
 | --- | --- |
-| 想快速看懂整个项目 | [三分钟架构与流程图](architecture.md) |
-| 想进一步理解系统设计 | [根 README：架构与完整执行链](../README.md) |
-| 想理解 Agent 为什么不是普通 RAG 的替代品 | [从 RAG 基线到可观测 Agent](agent_mvp.md) |
-| 想调接口或实现客户端 | [在 JSON 与 SSE 之间：Agent API 契约](api_agent.md) |
-| 想把项目在本机跑起来 | [让本地 RAG 栈稳定运行：环境与排障](environment.md) |
-| 想做一次可信的现场演示 | [如何演示一条不造假的 RAG / Agent 链路](demo_cases.md) |
-| 想理解 ingest、检索和容量边界 | [从一个文件到百万 chunk](rag_ingest_retrieval_capacity.md) |
-| 想查看数据库表与外键关系 | [数据库关系图](数据库关系.md) |
-| 想了解下一阶段的双模型评测计划 | [本地小模型路由与双模型 RAG 路线图](rag_evaluation_roadmap.md) |
-| 想设计性能实验 | [不要只测 QPS：性能测试指南](performance_test_guide.md) |
-| 想看运行指标从哪里来 | [从系统健康到检索质量：监控指标](monitoring_metrics.md) |
-| 想理解 Gateway 的安全边界 | [把流量挡在业务之前：鉴权与限流](gateway_auth_rate_limit.md) |
-| 想复盘 embedding 微调实验 | [当 Top-1 上升而 Recall@10 下降](embedding_finetune.md) |
-| 想查看历史测试证据 | [Agent MVP 联调证据](agent_mvp_test_report.md) |
-| 想查看历史代码审核 | [从 Demo 到工程系统：代码审核快照](code_review_completion_assessment.md) |
+| 第一次了解项目 | [架构概览](architecture.md) → [项目首页](../README.md) |
+| 本地启动与演示 | [运行环境与排障](environment.md) → [演示案例](demo_cases.md) |
+| 调用接口或实现客户端 | [API 契约](api_agent.md) → [Gateway 鉴权与限流](gateway_auth_rate_limit.md) |
+| 修改 Agent 或检索逻辑 | [Agent 设计](agent_mvp.md) → [Ingest、检索与容量](rag_ingest_retrieval_capacity.md) → [数据库关系](数据库关系.md) |
+| 测量性能与定位瓶颈 | [监控指标](monitoring_metrics.md) → [性能测试指南](performance_test_guide.md) |
 
-## 推荐阅读路径
+## 运行与接口
 
-```mermaid
-flowchart LR
-    A[根 README] --> B[Agent 设计]
-    A --> C[Ingest / Retrieval 容量]
-    B --> D[API 契约]
-    C --> E[性能与监控]
-    D --> F[环境与演示]
-    E --> F
-    F --> G[测试证据与历史审核]
-```
+| 文档 | 内容 | 性质 |
+| --- | --- | --- |
+| [运行环境与排障](environment.md) | Python 环境、Gateway 依赖、模型配置、GPU、启动与故障定位 | 当前说明 |
+| [API 契约](api_agent.md) | 文档、任务、会话、RAG / Agent、工具与 SSE 续传 | 当前契约 |
+| [Gateway 鉴权与限流](gateway_auth_rate_limit.md) | API Key、principal、IP / 用户限流和 SSE 连接保护 | 当前说明 |
+| [演示案例](demo_cases.md) | 成功、无证据、无需检索、文档范围与接口交叉验证 | 操作指南 |
 
-如果只准备本地运行，直接阅读“环境与排障”和“演示案例”即可。如果要修改检索或 Agent 逻辑，建议先读根 README、容量设计和 Agent 设计，再进入 API 文档。
+完整启动脚本参数见 [scripts/README.md](../scripts/README.md)。
+
+## 架构与数据
+
+| 文档 | 内容 | 性质 |
+| --- | --- | --- |
+| [架构概览](architecture.md) | 系统边界、主要流程、架构图与代码入口 | 当前说明 |
+| [Agent 设计](agent_mvp.md) | MVP 范围、检索路由、只读工具、Trace 和验收入口 | 当前说明 |
+| [数据库关系](数据库关系.md) | 业务表、Agent Trace、外键与非外键逻辑关联 | 结构参考 |
+| [Ingest、检索与容量](rag_ingest_retrieval_capacity.md) | 入库与查询成本、向量存储估算、容量边界与工程建议 | 实现说明与容量估算 |
+
+## 监控与性能验证
+
+| 文档 | 内容 | 性质 |
+| --- | --- | --- |
+| [监控指标](monitoring_metrics.md) | 系统资源、队列、请求、成本和检索质量的来源与限制 | 当前说明 |
+| [性能测试指南](performance_test_guide.md) | 固定输入、预热、并发测试、结果判读与留档模板 | 操作指南 |
+
+## 后续规划
+
+| 文档 | 内容 | 性质 |
+| --- | --- | --- |
+| [双模型 RAG 优化路线图](rag_evaluation_roadmap.md) | 四路选择、回答模型切换、质量与成本对照评测 | 后续规划；当前检索路由见 Agent 设计 |
+
+## 实验与历史记录
+
+| 文档 | 内容 | 性质 |
+| --- | --- | --- |
+| [Embedding 微调复盘](embedding_finetune.md) | KALM LoRA 指标、召回取舍及接入索引的兼容要求 | 历史实验与接入说明 |
+| [Agent MVP 联调报告](agent_mvp_test_report.md) | 工具协议、检索与失败场景的验证证据 | 历史快照，验证记录截至 2026-07-01 |
+| [代码审核快照](code_review_completion_assessment.md) | 审核结论、已收敛问题、风险与后续建议 | 历史快照，整理于 2026-07-13 |
+
+## 图片资源
+
+| 文件 | 用途 |
+| --- | --- |
+| [architecture-overview.png](architecture-overview.png) | 架构与流程图，对应架构概览 |
+| [rag-workbench-overview.png](rag-workbench-overview.png) | 工作台概览，供项目首页展示 |
+| [项目运行前端界面.png](项目运行前端界面.png) | 前端运行截图参考 |
 
 ## 如何理解文档中的结论
 
-这里区分三种内容：
+阅读时注意内容性质：
 
 - **当前契约**：接口、启动命令、数据结构和运行约束，应与当前代码一致。
 - **设计讨论**：解释为什么选择 MySQL、LanceDB、Celery、SSE 或只读工具，以及它们的取舍。
+- **后续规划**：描述待实施和待验证的目标；已有基础能力与计划增量分别说明，不能当成已交付功能。
 - **历史快照**：测试报告和代码审核只证明当时执行过什么，不代表当前进程仍处于同样状态。
 
 文档不会把默认配置描述成实际运行配置，也不会把“接口存在”描述成“服务健康”。涉及性能、容量和质量的数字都需要结合对应实验条件阅读。
@@ -51,6 +78,9 @@ flowchart LR
 
 - 外部调用优先写 Gateway `/v1/*`；FastAPI `/internal/*` 只用于服务间调用和调试。
 - FastAPI 和 Gateway 的非 SSE API，包括安全错误，均使用 `{code, message, data}`。SSE 使用有 `type` 的编号事件，并以 `done` 或 `error` 结束。
+- SSE 续传使用同一次运行的标识和 `Last-Event-ID`；断线后生成继续，续传状态过期时明确失败。最终消息和 citations 落库后才能发出 `done`。
 - 启动命令以 `scripts/start_all.sh` 为统一入口；本地 vLLM 保持独立启动。
 - 新增真实验证结果时记录日期、命令、环境边界和未执行项。
+- 专题文档提供返回本页的链接；长文提供章节目录，标题变化时同步更新锚点。
+- 新增文档时更新对应分类；图片也登记用途。历史记录保留原始条件与结果，当前行为以对应专题和代码为准。
 - 架构变化先更新根 README，再更新这里对应的专题文章。

@@ -1,5 +1,7 @@
 # 三分钟看懂 RAG Gateway Stack
 
+[返回文档地图](README.md)
+
 这是一套支持文档入库、知识库问答和只读 Agent 工具调用的工程栈。前端既展示答案与引用，也展示索引进度和执行轨迹。
 
 ![RAG Gateway Stack 项目架构图](./architecture-overview.png)

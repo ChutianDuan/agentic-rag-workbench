@@ -6,6 +6,19 @@ RAG 客户端真正需要稳定的不是 URL 数量，而是三类契约：普�
 
 外部客户端优先使用 Drogon Gateway `/v1/*`；FastAPI `/internal/*` 只用于服务间调用和调试。兼容 `/api/agent/*` 不是推荐的新客户端入口。
 
+## 章节导航
+
+- [先选择正确的交互模式](#先选择正确的交互模式)
+- [JSON envelope 与 SSE](#json-envelope-与-sse)
+- [文档与建库](#文档与建库)
+- [会话与消息](#会话与消息)
+- [普通 RAG 接口](#普通-rag-接口)
+- [新 Agent 接口](#新-agent-接口)
+- [Agent 工具](#agent-工具)
+- [SSE 续传与失败处理](#sse-续传与失败处理)
+- [常见错误](#常见错误)
+- [客户端实现检查清单](#客户端实现检查清单)
+
 ## 先选择正确的交互模式
 
 | 需求 | 推荐入口 | 完成依据 |
@@ -124,12 +137,50 @@ GET /v1/tasks/{task_id}
 
 任务成功时 `data.state` 为 `SUCCESS`。文档只有在后续 embedding 任务完成、`index_status=indexed` 后才真正可检索；解析 task 成功不等于索引已经完成。
 
+### 两阶段任务怎样继续轮询
+
+上传返回的 `task_id` 对应 `parse_document`。解析完成后会创建 `build_embedding` 子任务，父任务响应的 `data.meta` 包含：
+
+```json
+{
+  "embedding_task_id": "550e8400-e29b-41d4-a716-446655440003",
+  "embedding_db_task_id": 7,
+  "embedding_status_url": "/internal/tasks/550e8400-e29b-41d4-a716-446655440003",
+  "index_status": "parsed",
+  "chunk_count": 18
+}
+```
+
+以上是 `meta` 中的部分字段示例。外部客户端按以下顺序确认入库完成：
+
+1. 保存上传响应的 `doc_id` 和 `task_id`，轮询 `GET /v1/tasks/{task_id}`。
+2. 父任务 `SUCCESS` 后，从 `data.meta.embedding_task_id` 取得子任务 ID，继续通过 Gateway 查询子任务。
+3. 同时查询 `GET /v1/documents/{doc_id}`；只有 `index_status=indexed` 才将文档列为可检索。
+4. 任一任务 `FAILURE` 时展示 `data.error`，结合 `data.meta.stage` 和文档的 `error_message` 定位失败阶段。
+
+`data.progress` 是当前任务的进度，不是两阶段全流程的百分比。父任务到 100 后，子任务可能仍在排队。未知任务 ID 的查询可能回落到 Celery 并显示 `PENDING`，不能仅凭这一状态认定任务记录存在。
+
+字段来源见[任务查询服务](../python_rag/app/modules/tasks/service.py)与[解析 / 向量化任务](../python_rag/app/tasks/index_tasks.py)。
+
 ### 查询文档
 
 ```http
 GET /v1/documents?status=READY&limit=100
 GET /v1/documents/{doc_id}
 ```
+
+列表支持 `user_id`、`status` 和 `limit`：`user_id` 为正整数，`limit` 默认 100、范围 1–1000。`status=READY` 或 `status=indexed` 用于筛选可检索文档；其他状态按存储值筛选。返回列表位于 `data.items`，当前没有分页游标或总条数契约。
+
+| `index_status` | 含义 | 是否可检索 |
+| --- | --- | --- |
+| `not_indexed` | 已保存，尚未开始建立索引 | 否 |
+| `parsing` | 正在抽取正文和切片 | 否 |
+| `parsed` | chunks 已写入 MySQL，等待向量化 | 否 |
+| `indexing` | 正在生成 embedding 和写入向量索引 | 否 |
+| `indexed` | 向量和索引元数据已写入 | 是，仍需与当前 embedding 模型兼容 |
+| `failed` | 解析、排队或向量化阶段失败 | 否 |
+
+不要将 `documents.status`、`index_status`、Celery task state 与前端的 Parsing / Chunking / Embedding 标签直接等同。当前解析和向量化过程中，文档 `status` 可以仍为 `uploaded`；细分进度以任务 `meta.stage` 为准。向量化失败会保留已解析 chunks，可在修复模型或索引问题后使用内部 rebuild 接口，不必重新解析文件。
 
 ## 会话与消息
 
@@ -193,6 +244,19 @@ GET /v1/sessions/{session_id}/messages
 ```
 
 ## 普通 RAG 接口
+
+### 请求参数与文档范围
+
+| 参数 | 类型 / 限制 | 说明 |
+| --- | --- | --- |
+| `session_id` | 正整数 | 流式请求放在正文；异步请求由 URL 提供，必须对应已存在的会话 |
+| `content` | 非空字符串 | Gateway 首次请求使用，用于创建 user message |
+| `user_message_id` | 正整数 | 普通 Chat 流的已有消息标识，续传时使用；必须属于该会话且 `role=user` |
+| `top_k` | 整数，默认 3，范围 1–10 | 最终检索结果数量上限；粗召回候选数由检索配置另行控制 |
+| `doc_id` | 可选正整数 | 单文档范围 |
+| `doc_ids` | 可选数组，1–100 项正整数 | 多文档范围，重复 ID 按首次出现顺序去重 |
+
+未指定文档范围时查询可用的 indexed 文档。普通 Chat 与 Agent 请求字段不同：Agent 使用 `message`，当前 `AgentChatRequest` 未定义 `doc_id`、`doc_ids` 或 `top_k`，不能靠附加这些字段限制 Agent 的检索范围。普通 Chat 参数约束见[请求模型](../python_rag/app/modules/chat/schemas.py)，Agent 参数见[Agent 请求模型](../python_rag/app/agent/schemas.py)。
 
 ### 异步普通 RAG 问答
 
@@ -277,11 +341,13 @@ Content-Type: application/json
 {"session_id":3,"user_message_id":21,"top_k":5}
 ```
 
-如果重新发送原始 `content`，Gateway 会把它当成新消息，存在重复生成风险。续传状态默认保留 15 分钟；过期时返回明确 `error`，不会静默重启任务。
+如果省略 `user_message_id` 而重新发送原始 `content`，Gateway 会把它当成新消息，存在重复生成风险。续传状态默认保留 15 分钟；过期时返回明确 `error`，不会静默重启任务。
 
 ## 新 Agent 接口
 
 ### 网关流式 Agent 问答
+
+正文中的 `session_id` 为正整数，`message` 为非空字符串，`trace_id` 可选且最长 128 字符。需要续传的客户端应为每次新运行生成唯一、非空的 `trace_id`，并在同一次运行的所有重连中复用。
 
 ```http
 POST /v1/agent/chat/stream
@@ -426,7 +492,7 @@ GET /internal/agent/runs/{run_id}/steps
 
 ## Agent 工具
 
-Agent 当前只允许只读工具。入口会先做轻量检索意图判断：问题命中项目文档、代码、架构、能力、上传文档、网页导入、embedding、索引等意图时，后端会先执行一次 `knowledge_search`，Trace 决策记为 `forced_tool_call`，再让 LLM 基于工具结果总结。
+Agent 当前只允许只读工具。入口按明确意图优先匹配规则，歧义问题交给轻量分类模型；路由为 `rag` 时先执行一次 `knowledge_search`，Trace 决策记为 `forced_tool_call`，再让 LLM 基于工具结果总结。`agent` 禁用知识检索并保留其他只读工具，`fallback` 交回 Agent 判断；代码、架构、embedding 等通用词本身不会强制检索。诊断字段见[Agent 路由诊断](#agent-路由诊断)。
 
 未命中强制检索路由，或强制检索后仍需要补充上下文时，Agent 继续按循环方式工作：LLM 返回 `tool_calls` 时，后端先按工具 schema 做轻量参数校验，再用工具自身 `timeout_ms` 执行工具并把结果写回上下文；LLM 不再返回 `tool_calls` 时，该轮内容作为最终答案。重复的同名同参数工具调用会被跳过并记录为失败工具结果。
 
@@ -516,13 +582,55 @@ Agent 会把带有 `doc_id`、`chunk_id`、`chunk_index` 的结果转换为 cita
 | `list_ready_documents` | 列出当前可检索的 indexed 文档。 |
 | `list_message_citations` | 根据 assistant `message_id` 查询已保存 citations。 |
 
+## SSE 续传与失败处理
+
+### 哪些字段标识同一次生成
+
+| 项目 | 普通 Chat | Agent |
+| --- | --- | --- |
+| 首次请求正文 | `session_id`、`content` 与检索参数 | `session_id`、`message`、`trace_id` |
+| 续传正文 | 使用 `user_message_id` 替换 `content`，保持检索参数 | 保持原 `session_id`、`message`、`trace_id` |
+| 服务端缓存标识 | session、user message、`doc_id`、有序 `doc_ids`、`top_k` | session 与非空 `trace_id`；未提供时退化为问题文本 |
+| 续传位置 | `Last-Event-ID` 指定最后已处理的编号 | 同左 |
+
+普通 Chat 重连时保持 `doc_ids` 顺序和 `top_k`，不要重新生成消息 ID；这些字段参与缓存查找。Agent 未提供 `trace_id` 时会按问题文本识别活跃流，相同问题可能复用同一次运行，因此自定义客户端应显式提供 `trace_id`。
+
+以下为 Agent 续传示例，`18` 应替换为客户端已完整处理的最后事件 ID：
+
+```bash
+curl -N -X POST http://127.0.0.1:8080/v1/agent/chat/stream \
+  -H 'Content-Type: application/json' \
+  -H 'Last-Event-ID: 18' \
+  -d '{"session_id":3,"message":"根据知识库总结这个系统的架构和核心链路","trace_id":"demo-agent-001"}'
+```
+
+如果首次响应还未收到业务事件但已经取得运行标识，可在重连时发送 `Last-Event-ID: 0`。不要省略续传头：非空的头才表示续传，省略后会按新请求处理已结束的流。客户端应发送非负整数；当前解析器将非法值或负数归零，但这不是参数校验成功的证明。
+
+### 缓存、心跳和终止事件
+
+- 两种流均在 API 进程内保存事件；已完成流从完成时起保留 15 分钟，各自最多保留 128 条已完成流，超出时优先淘汰最早完成的记录。活跃流不按这两个完成缓存限制清理。
+- 无新事件时约每 15 秒发送 `: keep-alive` 注释；心跳不分配 ID，也不推进续传游标。
+- 客户端应按完整 SSE 帧处理事件，支持网络块跨帧拆分与多行 `data`。Gateway 的 `gateway_metrics` 没有业务事件编号，不用于推进 `Last-Event-ID`。
+- 已完成的 `done` 或 `error` 也可重放。只有 `done` 表示成功结束；连接关闭且没有终止事件时，客户端仍需恢复或确认失败。
+- 最终答案和 citations 保存后才发出 `done`。Agent 当前完整答案完成后一次性发送 `delta`，工具 Trace 实时到达不代表回答逐 token 生成。
+
+缓存丢失可能来自 TTL、数量淘汰、API 重启，或请求被分配到另一 API 进程。携带续传头但找不到状态时返回 `code=6004`、`message="stream resume state expired"` 的终止 `error`；服务端不会重新生成。多进程部署需要确保续传落到原进程，当前实现未提供共享持久化的事件缓存。
+
+### 错误发生在响应前还是流中
+
+SSE 入口也可能先返回 JSON：参数校验、会话检查、鉴权、限流或流槽位不足均可能在建立流之前失败。客户端先检查 HTTP status 和 `Content-Type`；收到 JSON 时解析 `{code, message, data}`，收到 `text/event-stream` 后再解析事件。
+
+Gateway 流槽位不足时返回 HTTP 429、`code=4290`、`Retry-After: 1`；API 续传失败使用数值 `6004`。Gateway 代理上游失败的 SSE `code` 则可能为 `UPSTREAM_HTTP_ERROR` 或 `UPSTREAM_STREAM_ERROR` 字符串，因此不要将所有 SSE 错误码假设为整数，也不要把所有失败自动重发为新问题。
+
+实现入口：[共用 SSE 编解码](../python_rag/app/shared/sse.py)、[Chat 续传缓存](../python_rag/app/modules/chat/resumable_stream.py)、[Agent 续传缓存](../python_rag/app/agent/streaming/agent_streaming_service.py)、[Gateway 流式处理](../cpp_gateway/src/handlers/StreamChatHandler.cc)。
+
 ## 常见错误
 
 | 现象 | 可能原因 | 处理 |
 | --- | --- | --- |
 | `session not found` | `session_id` 不存在。 | 先调用 `/v1/sessions` 创建会话。 |
 | `no ready document index found` | 没有 indexed 文档，或 embedding 模型切换后旧索引不可用。 | 上传文档并等待 embedding 完成；已有文档可通过内部重建接口重新计算向量。 |
-| Agent 没有工具调用 | 问题未命中强制检索路由，且被 LLM 判断为闲聊或不依赖文档。 | 提问中明确要求“根据知识库/项目文档/代码/架构/上传文档”。 |
+| Agent 没有工具调用 | 路由为 `agent`，或 `fallback` 下模型判断无需工具。 | 查看 `routing` 和 Trace；需要文档证据时明确要求“根据知识库/项目文档/上传文档”，不要仅添加通用技术词。 |
 | citations 为空 | 工具未检索到结果，或工具结果缺少 chunk 元数据。 | 检查 `tool_result.result.data.total` 和 `/internal/agent/runs/{run_id}/steps`。 |
 | Agent 返回“已达到工具调用上限” | 达到 `max_steps` 安全上限。 | 查看 Trace 中 `termination_reason=max_steps`，必要时缩小问题或提高 `max_steps`。 |
 

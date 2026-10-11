@@ -11,6 +11,18 @@
 
 这篇文章讨论这条闭环为什么这样划分、普通 RAG 为什么仍然保留，以及怎样用前端和 Trace 证明 Agent 确实执行过预期步骤。
 
+## 章节导航
+
+- [先定义边界，再讨论能力](#先定义边界再讨论能力)
+- [一次 Agent 请求经过哪些边界](#一次-agent-请求经过哪些边界)
+- [代码目录](#代码目录)
+- [先把运行条件固定下来](#先把运行条件固定下来)
+- [为什么还要保留普通 RAG](#为什么还要保留普通-rag)
+- [在工作台里观察真实执行](#在工作台里观察真实执行)
+- [CLI 验收](#cli-验收)
+- [最小回归测试](#最小回归测试)
+- [MVP 完成不等于生产完成](#mvp-完成不等于生产完成)
+
 ## 先定义边界，再讨论能力
 
 ### 已纳入
@@ -101,6 +113,22 @@ ROUTER_LLM_MAX_TOKENS=96
 
 同步响应 `data.routing`、SSE `final.routing` 与 `done.meta.routing` 提供决策来源、原因、模型、耗时和分类用量。相同诊断保存在 run metadata 与最终消息 metadata；分类用量保存在 `routing.usage`，不混入主模型生成用量。续传重放已保存事件，不重新分类或检索。普通 RAG 接口始终走原检索流程。
 
+### 用具体问题核对路由
+
+| 问题示例 | 决策来源 | 预期行为 |
+| --- | --- | --- |
+| `根据项目文档总结系统架构` | 规则，`route=rag` | 检索工具可用时强制首次检索 |
+| `你好！` | 规则，`route=agent` | 不开放 `knowledge_search` |
+| `当前知识库有哪些文档？` | 规则，`route=agent` | 可调用文档列表工具，无需读取 chunk 正文 |
+| `查看 document_id=7 的文档详情` | 规则，`route=agent` | 可调用文档详情工具 |
+| `什么是 embedding？` | 轻量分类模型 | 仅凭术语不能确定路线，结果取决于分类输出 |
+| `列出文档并根据项目文档总结架构` | 轻量分类模型 | 混合意图不按纯列表查询处理 |
+| `继续解释上面的模块` | 轻量分类模型 | 分类器结合近期对话与摘要判断 |
+
+前四行的规则行为可由[意图路由测试](../tests/test_intent_router.py)复核；模型分类示例不承诺某个固定输出。真实模型结果应检查 `routing.source`、`route`、`reason` 和工具事件，不能只看问题里是否含有技术关键词。
+
+分类器只接受恰好包含 `route` 且取值为 `rag` 或 `agent` 的 JSON 对象。Markdown 代码块、额外字段、工具调用或被截断的分类结果都进入 `fallback`。出现 `model_not_configured` 时先检查 `ROUTER_LLM_MODEL`；`model_timeout` 检查独立分类超时和服务；`invalid_model_output` 检查模型返回格式。这些诊断不代表回答模型已经失败，`fallback` 仍允许 Agent 执行原工具判断。
+
 ### 其他模型配置
 
 如果本机没有 reranker 权重且不希望演示时下载模型，可以临时设置：
@@ -120,7 +148,7 @@ RERANK_FALLBACK_TO_FAISS=true
 bash scripts/init_db.sh
 ```
 
-该脚本会执行 `db/init.sql` 和增量脚本，其中 `db/004_create_agent_tables.sql` 会创建 Agent Trace 所需的三张表。
+当前脚本执行 `db/init.sql`，并扫描 `db/*_schema_upgrade.sql` 与可选的 `db/migrations/*.sql`。Agent Trace 三张表定义在 `db/004_create_agent_tables.sql`，该文件名不匹配上述扫描范围；初始化后应单独确认这些表存在，缺表时在目标库执行该 SQL。检查方法见[初始化后的表结构检查](environment.md#初始化后的表结构检查)。
 
 ### 3. 启动应用栈
 
@@ -185,8 +213,8 @@ GET  /internal/agent/runs/{run_id}/steps
 
 特点：
 
-- Agent 入口会先做轻量检索意图路由；命中项目文档、代码、架构、能力、上传文档、网页导入、embedding、索引等意图时，会先执行一次 `knowledge_search`，再让 LLM 基于工具结果总结。
-- 未命中强制检索路由时，Agent 每轮由 LLM 判断是否需要继续调用工具。
+- Agent 入口先按明确意图匹配规则，未命中时结合近期对话和摘要调用轻量分类模型；仅出现代码、架构、embedding 等通用词不会直接强制检索。路由为 `rag` 时先执行一次 `knowledge_search`，再让 LLM 基于工具结果总结。
+- 路由为 `agent` 时禁用 `knowledge_search`，保留其他只读工具；分类失败进入 `fallback`，交回 Agent 自主判断是否检索。完整规则见[Agent 检索路由](#agent-检索路由)。
 - 当前只暴露只读工具：`knowledge_search`、`get_document_detail`、`list_ready_documents`、`list_message_citations`。
 - 如果 LLM 返回 `tool_calls`，后端先按工具 schema 做轻量参数校验，再用工具自身 `timeout_ms` 执行工具并把结果写回上下文；如果 LLM 不再返回 `tool_calls`，该轮内容作为最终答案。
 - 强制检索会在 Trace 中记录为 `forced_tool_call` step；后续 LLM 仍可继续调用其他只读工具。
