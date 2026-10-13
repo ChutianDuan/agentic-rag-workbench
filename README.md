@@ -1,121 +1,229 @@
-# 把一次 RAG 问答摊开来看：RAG Gateway Stack 的架构与实现
+# RAG Gateway Stack
 
-RAG 系统最容易被低估的地方，是它看起来只需要“检索几段文本，再调用一次模型”。真正开始做工程实现后，问题会迅速变成另一种形态：文件由谁接收，chunk 以谁为准，向量索引如何重建，流式回答断线后是否重复生成，Agent 调过哪些工具，最终引用能不能回查。
+基于 C++ Drogon、FastAPI 和 React 的 RAG / Agent 工程栈，提供文档入库、知识库问答、来源引用、只读工具调用与执行链路观测。
 
-这个仓库不是一个套着聊天框的模型调用示例，而是一套可以在本地完整运行、观察和验证的 RAG / Agent 工程栈。它把入口网关、业务服务、异步任务、结构化数据、向量检索、模型调用和前端工作台拆成独立边界，让一条问题从进入系统到答案与 citations 落库的过程可以被检查。
+项目覆盖从文件上传、异步解析和向量索引，到检索增强生成、消息持久化和流式交互的完整流程。C++ 网关负责对外协议与流量控制，Python 服务负责 RAG 与 Agent 业务，前端工作台展示文档状态、回答证据和执行轨迹。
 
-本文按技术博客的方式介绍它：先讨论为什么这样拆，再沿着文档入库、普通 RAG、Agent、SSE 续传和前端观测逐层展开，最后给出可以直接运行的启动与验证方法。
+适用于本地知识库原型、RAG / Agent 工程实践、检索与模型接入验证，以及系统架构演示。当前以本地开发和工程验证为主要目标。
 
-## 一张图先看清边界
+[快速开始](#快速开始) · [系统架构](#系统架构) · [API 概览](#api-概览) · [技术文档](docs/README.md)
 
-![RAG Gateway Stack 架构与主要流程](./docs/architecture-overview.png)
+## 核心能力
 
-第一次了解项目，先看[三分钟架构与流程图](docs/architecture.md)：组件职责、文档入库、RAG / Agent 问答，以及对应代码入口。[高清 PNG](docs/architecture-overview.png) 可直接用于分享或演示。
+| 能力 | 说明 |
+| --- | --- |
+| 文档入库 | 支持 Markdown、TXT、JSON、CSV、PDF、DOCX、XLSX 与网页 URL；通过 Celery 异步完成解析、切片、向量化和索引 |
+| 知识库问答 | LanceDB 向量召回、MySQL 正文补齐、可选 CrossEncoder 重排；支持指定文档范围 |
+| 引用追溯 | 保存回答与 citations，关联原始文档和 chunk，支持历史消息引用回查 |
+| 只读 Agent | 结合意图路由、会话摘要、最近消息和用户记忆，执行有步数上限的工具循环 |
+| SSE 续传 | 使用递增事件 ID 和 `Last-Event-ID` 恢复；客户端断开后生成继续，答案与引用落库后发送 `done` |
+| 执行观测 | 展示文档索引阶段、Execution Flow、Agent Trace、任务状态与运行监控 |
+| 网关控制 | 提供 CORS、可配置 API Key 鉴权、Redis 限流、活跃流数量限制与健康检查 |
+| 模型接入 | 支持远端 OpenAI-compatible API 或独立本地 vLLM；Embedding 与 Reranker 单独配置 |
 
-```mermaid
-flowchart LR
-    Browser[React RAG Workbench]
-    Gateway[C++ Drogon Gateway]
-    API[FastAPI Internal Service]
-    Worker[Celery Worker]
-    MySQL[(MySQL)]
-    Redis[(Redis)]
-    Lance[(LanceDB)]
-    Embed[Embedding / Reranker]
-    LLM[OpenAI-compatible LLM / vLLM]
+## 工作台预览
 
-    Browser -->|/v1/*, SSE| Gateway
-    Gateway -->|/internal/*| API
-    Gateway -->|metadata / health| MySQL
-    Gateway -->|rate limit| Redis
-    API --> MySQL
-    API --> Redis
-    Redis --> Worker
-    Worker --> MySQL
-    Worker --> Lance
-    Worker --> Embed
-    API --> Lance
-    API --> Embed
-    API --> LLM
-```
+![RAG Workbench：文档、执行流程、回答引用与 Agent Trace](docs/rag-workbench-overview.png)
 
-| 组件 | 主要职责 | 默认入口 |
+工作台将文档管理、知识库问答和链路诊断放在同一界面：查看文档入库进度，跟踪工具调用与检索结果，阅读回答及其来源，并检查服务依赖状态。
+
+## 系统架构
+
+![RAG Gateway Stack 架构与主要流程](docs/architecture-overview.png)
+
+| 层级 | 组件 | 职责 |
 | --- | --- | --- |
-| React Workbench | 文档、会话、执行流程、回答、引用与 Agent Trace | `http://127.0.0.1:5173` |
-| C++ Drogon Gateway | 对外 API、上传、CORS、鉴权、限流、健康聚合、SSE 代理 | `http://127.0.0.1:8080` |
-| FastAPI | 文档、检索、Prompt、Chat、Agent、Trace 与监控业务 | `http://127.0.0.1:8000` |
-| Celery Worker | 解析、切片、embedding、索引和非流式 Chat 任务 | Redis broker |
-| MySQL | 文档、chunk、会话、消息、citations、任务与 Agent Trace | `.env` |
-| Redis | Celery broker / result backend，也可用于 Gateway 限流 | `.env` |
-| LanceDB | chunk 向量与召回元数据 | `data/lancedb` |
-| Embedding / Reranker | Qwen embedding 与 CrossEncoder 重排 | API / Worker 进程内 |
-| LLM / vLLM | OpenAI-compatible Chat Completion | `.env` |
+| 交互层 | React + TypeScript + Vite | 文档管理、问答、引用展示、执行轨迹与监控 |
+| 网关层 | C++17 + Drogon + libcurl | 对外 `/v1/*` API、文件上传、鉴权、限流、健康聚合与 SSE 代理 |
+| 业务层 | Python + FastAPI | 内部 `/internal/*` API、检索、Prompt、Chat、Agent 与监控业务 |
+| 异步执行 | Celery + Redis | 文档解析、向量化、索引构建与非流式 Chat 任务 |
+| 结构化存储 | MySQL | 用户、文档、chunk、会话、消息、citations、任务与 Agent Trace |
+| 向量存储 | LanceDB | chunk 向量索引与召回元数据 |
+| 检索模型 | sentence-transformers | Embedding 与 CrossEncoder 重排 |
+| 生成模型 | OpenAI-compatible API / vLLM | 回答生成与 Agent 模型调用 |
 
-这里有一个刻意的设计：浏览器只面对 Gateway，FastAPI 保留为内部业务入口。Gateway 负责协议和流量边界，Python 负责变化更快的 RAG 与 Agent 逻辑。这样既没有把业务规则塞进 C++，也没有让上传、鉴权、限流和 SSE 代理散落在每个 Python 路由里。
+浏览器通过 Gateway 访问业务服务。FastAPI 与 Worker 共用业务模块，分别承担在线请求与异步任务。MySQL 是结构化业务数据的事实来源；LanceDB 保存可重建的向量索引，召回后从 MySQL 读取 chunk 正文；Redis 用于任务分发、结果缓存和网关限流。
 
-## 数据该由谁说了算
+完整组件关系与代码入口见 [架构概览](docs/architecture.md)。
 
-RAG 项目经常同时拥有数据库、缓存和向量库。三者都能“存数据”，但不能同时成为事实来源。
+### 核心流程
 
-本项目把 MySQL 作为结构化数据的 source of truth：文档是否存在、chunk 正文是什么、消息是否成功、引用来自哪里、Agent 运行了几步，都以 MySQL 记录为准。LanceDB 保存的是可重建的检索索引；Redis 保存的是任务传递和短期运行状态。
-
-这条边界带来几个直接结果：
-
-- LanceDB 召回的是候选 `chunk_id`，正文仍从 MySQL 批量读取。
-- 删除或重建文档时，先依据 MySQL 文档状态决定业务行为，再同步向量索引。
-- embedding 模型变化后必须重建旧索引，不能把不同向量空间混在一起比较。
-- citations 保存文档与 chunk 标识，而不是只保留一段无法回查的文本。
-
-## 第一条流水线：文档如何进入知识库
-
-文档入口支持本地文件和网页 URL。两种来源在创建文档记录后汇入同一条异步 ingest 流程。
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant G as Drogon Gateway
-    participant A as FastAPI
-    participant Q as Redis / Celery
-    participant W as Worker
-    participant M as MySQL
-    participant L as LanceDB
-
-    U->>G: POST /v1/documents 或 /v1/documents/web
-    G->>A: 保存文件并创建文档
-    A->>M: document = parsing
-    A->>Q: parse_document(doc_id)
-    Q->>W: 分发解析任务
-    W->>M: 写入 chunks
-    W->>Q: build_embedding(doc_id)
-    Q->>W: 分发 embedding 任务
-    W->>L: 写入 chunk vectors
-    W->>M: index_status = indexed
-```
-
-解析和 embedding 是两个任务，而不是一个不可分割的黑盒。任务元数据会记录 `queued`、`document_loaded`、`document_chunked`、`chunks_written`、`embedding_started`、`embedding_finished` 等阶段，前端据此展示 Parsing、Chunking、Embedding、Indexed 或 Failed。
-
-当前文件入口支持 `.md`、`.txt`、`.json`、`.csv`、`.pdf`、`.docx` 和 `.xlsx`。网页入口负责抓取正文并保存为普通文档，后续不再维护一套特殊的网页检索逻辑。
-
-## 第二条流水线：普通 RAG 如何形成可引用答案
-
-普通 RAG 是稳定基线。它没有 Agent 工具循环，但完整保留了检索、重排、持久化和流式传输。
+**文档入库**
 
 ```text
-用户问题
-  -> 创建 user message
-  -> 在 indexed 文档范围内生成 query embedding
-  -> LanceDB 召回候选 chunk_id
-  -> MySQL 批量补齐 chunk 正文与文档信息
-  -> CrossEncoder rerank
-  -> 组装带来源信息的 Prompt
-  -> LLM 流式生成
-  -> 保存 assistant message 与 citations
-  -> 发出 done
+文件上传 / 网页导入 -> 创建文档 -> Celery 解析与切片
+                    -> MySQL 保存 chunks -> Embedding -> LanceDB 索引
 ```
 
-请求没有传 `doc_id` / `doc_ids` 时，检索范围是当前可用的 indexed 文档；显式传入后则限制到指定文档。召回和重排分开保留 `lancedb_score`、`rerank_score`、原始 rank 与最终 rank，因此“为什么某个 chunk 成为引用”可以被解释，而不只是得到一个最终列表。
+解析与向量化分为两个异步任务，前端通过文档和任务接口查询阶段与失败信息。
 
-FastAPI 业务接口和多数 Gateway JSON 路径使用同一种响应外壳：
+**普通 RAG 问答**
+
+```text
+用户问题 -> Query Embedding -> LanceDB 召回 -> MySQL 补齐正文
+         -> 可选重排 -> Prompt 组装 -> LLM 生成 -> 保存回答与 citations
+```
+
+默认检索已完成索引的可用文档；传入 `doc_id` / `doc_ids` 后限制检索范围。检索结果保留召回分数、重排分数和排名信息，便于定位证据来源与排序变化。
+
+**Agent 问答**
+
+```text
+问题与会话记忆 -> 意图路由 -> 模型决策 / 知识库检索
+               -> 只读工具循环 -> 最终回答 -> 保存消息、引用与 Trace
+```
+
+意图路由先匹配明确规则，再由模型判断歧义问题。需要知识库证据时先执行检索，普通问候和纯元数据查询进入相应 Agent 分支。
+
+内置工具包括：
+
+| 工具 | 用途 |
+| --- | --- |
+| `knowledge_search` | 检索知识库，返回 chunk、分数和来源元数据 |
+| `get_document_detail` | 查询文档状态、元数据与 chunk 摘要 |
+| `list_ready_documents` | 列出已完成索引的文档 |
+| `list_message_citations` | 查询历史回答的已保存引用 |
+
+普通 RAG 在生成过程中逐步发送回答 `delta`；当前 Agent 实时发送执行事件，最终回答完成并持久化后再发送答案 `delta`、`final` 和 `done`。
+
+<a id="如何在本地启动"></a>
+
+## 快速开始
+
+以下命令均从仓库根目录执行。
+
+### 1. 环境要求
+
+- Linux、Bash 和 Python 3.10+，可使用 Conda 或项目内虚拟环境。
+- Node.js 与 npm，用于安装和构建前端。
+- C++17 编译器、CMake 3.16+、Drogon、libcurl，以及 Drogon 所需的 JsonCpp 等依赖；Drogon 必须启用 MySQL 与 Redis 支持。
+- 可访问的 MySQL、Redis 服务，以及 MySQL 命令行客户端。
+- 可用的生成模型服务；Embedding 与 Reranker 可使用本地模型路径或模型缓存，支持 CPU 运行。
+
+依赖安装、Drogon 构建与环境排障见 [运行环境说明](docs/environment.md)。
+
+### 2. 安装项目依赖
+
+```bash
+conda create -n rag-api python=3.10
+conda activate rag-api
+python -m pip install -r python_rag/requirements.txt
+python -m pip install -r python_rag/requirements-dev.txt
+
+(cd frontend && npm install)
+```
+
+也可使用项目内 `.venv`，启动脚本支持通过 `RAG_API_VENV` 指定环境路径。
+
+### 3. 配置服务与模型
+
+首次运行且尚无 `.env` 时，复制配置模板：
+
+```bash
+cp .env.example .env
+```
+
+按实际环境填写 MySQL、Redis 和模型连接信息。关键配置如下，完整变量见 [.env.example](.env.example)：
+
+| 配置 | 作用 |
+| --- | --- |
+| `MYSQL_*` | 数据库地址、库名与访问凭据 |
+| `REDIS_*`、`CELERY_BROKER_URL`、`CELERY_RESULT_BACKEND` | Redis 连接、任务队列与结果存储；启用认证时保持各连接一致 |
+| `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` | 生成模型服务地址、凭据与模型名称 |
+| `EMBEDDING_MODEL`、`EMBEDDING_DEVICE` | Embedding 模型与运行设备 |
+| `RERANK_MODEL`、`RERANK_ENABLE`、`RERANK_DEVICE` | 重排模型、开关与运行设备 |
+| `LANCEDB_PATH`、`UPLOAD_DIR` | 向量索引与上传文件目录 |
+| `GATEWAY_AUTH_ENABLED`、`GATEWAY_API_KEYS` | 网关 API Key 鉴权 |
+
+默认使用远端 OpenAI-compatible API，检索模型默认配置为 `Qwen/Qwen3-Embedding-0.6B` 与 `Qwen/Qwen3-Reranker-0.6B`。运行前需准备模型文件或确保模型来源可访问。切换 Embedding 模型后，应重建已有向量索引。
+
+Python 检索模型使用 CPU 时设置 `PYTHON_DISABLE_CUDA=true`；使用本机 GPU 时可设置 `PYTHON_CUDA_VISIBLE_DEVICES=4,5`，或用 `API_CUDA_VISIBLE_DEVICES`、`WORKER_CUDA_VISIBLE_DEVICES` 分别控制两个进程。
+
+本地 vLLM 需要单独的 Python 环境与模型路径，配置和启动方式见 [本地模型说明](docs/environment.md#配置分三层理解)。统一启动脚本不启动 vLLM。
+
+### 4. 初始化数据库并启动
+
+确认 MySQL 与 Redis 已运行后执行：
+
+```bash
+bash scripts/init_db.sh
+START_FRONTEND=true bash scripts/start_all.sh start
+```
+
+初始化脚本创建数据库并执行初始化与升级 SQL；数据库账号需具备对应权限，必要时配置 `MYSQL_ADMIN_USER` / `MYSQL_ADMIN_PASSWORD`。
+
+Gateway 二进制不存在时，启动脚本会自动执行 CMake 构建；需要手动构建时运行：
+
+```bash
+cmake -S cpp_gateway -B cpp_gateway/build -DCMAKE_BUILD_TYPE=Debug
+cmake --build cpp_gateway/build -j
+```
+
+启动后默认访问地址：
+
+| 服务 | 地址 |
+| --- | --- |
+| 前端工作台 | `http://127.0.0.1:5173` |
+| Gateway | `http://127.0.0.1:8080` |
+| FastAPI 内部服务 | `http://127.0.0.1:8000` |
+
+### 5. 验证与体验
+
+```bash
+bash scripts/start_all.sh status
+curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8000/internal/health
+```
+
+在工作台选择或创建用户，上传文档并等待索引完成，然后发起问题，查看回答引用与执行轨迹。示例问题与验收步骤见 [演示案例](docs/demo_cases.md)。启用网关鉴权后，API 请求需携带对应 API Key；配置方式见 [鉴权与限流](docs/gateway_auth_rate_limit.md)。
+
+## 服务管理与验证
+
+| 命令 | 用途 |
+| --- | --- |
+| `bash scripts/start_all.sh start` | 启动 API、Worker 与 Gateway |
+| `START_FRONTEND=true bash scripts/start_all.sh start` | 同时启动前端工作台 |
+| `bash scripts/start_all.sh restart api` | 重启 FastAPI |
+| `bash scripts/start_all.sh status` | 检查进程与 HTTP 状态 |
+| `bash scripts/start_all.sh logs worker` | 查看 Worker 日志 |
+| `bash scripts/start_all.sh stop` | 停止由脚本管理的服务 |
+
+PID 文件位于 `.run/`，运行日志位于 `logs/`。完整参数与单进程调试入口见 [脚本说明](scripts/README.md)。
+
+代码检查与回归测试：
+
+```bash
+python -m pytest
+python -m compileall python_rag tests
+bash scripts/ci_smoke.sh
+```
+
+`ci_smoke.sh` 包含 Python 编译检查、pytest、Shell 语法检查和前端构建（npm 可用时）。完整链路验证需要已启动的服务：
+
+```bash
+bash scripts/e2e_all.sh ./README.md
+```
+
+E2E 会创建真实的用户、文档、任务和消息记录。
+
+## API 概览
+
+客户端统一访问 Gateway `/v1/*`；FastAPI `/internal/*` 用于服务间调用与内部调试。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/v1/documents` | 上传文档并提交入库任务 |
+| `POST` | `/v1/documents/web` | 导入网页并提交入库任务 |
+| `GET` | `/v1/documents` | 查询文档与索引状态 |
+| `POST` | `/v1/sessions` | 创建会话 |
+| `POST` | `/v1/sessions/{id}/messages` | 提交非流式问答任务 |
+| `GET` | `/v1/sessions/{id}/messages` | 查询消息与 citations |
+| `POST` | `/v1/chat/stream` | 普通 RAG SSE 问答 |
+| `POST` | `/v1/agent/chat/stream` | Agent 问答与执行事件 |
+| `GET` | `/v1/tasks/{task_id}` | 查询异步任务状态 |
+| `GET` | `/v1/monitor/overview` | 查询运行与 RAG 指标 |
+
+非 SSE API 的成功与错误响应统一使用 `{code, message, data}`：
 
 ```json
 {
@@ -125,279 +233,51 @@ FastAPI 业务接口和多数 Gateway JSON 路径使用同一种响应外壳：
 }
 ```
 
-业务错误保持相同结构，只改变 `code`、`message`、`data` 和对应 HTTP 状态。Gateway 自身的参数校验、鉴权、限流与健康检查也遵守这一 envelope；SSE 则继续使用带 `type` 的事件协议。
+SSE 数据包含 `type`，事件 ID 单调递增，最终以 `done` 或 `error` 结束。续传需携带同一次运行的标识与 `Last-Event-ID`：普通 Chat 使用 `user_message_id`，Agent 使用 `trace_id`。生成在客户端断开后继续执行；服务端先保存最终消息与 citations，再发出 `done`。续传状态失效时明确返回错误，不重新启动生成。
 
-## 第三条流水线：Agent 在 RAG 之上增加了什么
+请求参数、事件结构、错误码与续传示例见 [API 契约](docs/api_agent.md)。
 
-Agent 不是把普通问答换成一个更长的 Prompt。它增加的是决策、工具协议、会话记忆和可持久化的执行轨迹。
+## 项目结构
 
 ```text
-用户问题
-  -> 注入用户记忆、会话摘要与最近消息
-  -> 意图路由
-  -> LLM 决策或强制 knowledge_search
-  -> 执行只读工具
-  -> 将工具观察写回上下文
-  -> 继续推理或生成最终回答
-  -> 保存 answer、citations、run、steps、tool calls
+.
+├── cpp_gateway/      # C++ Drogon 网关与 SSE 代理
+├── python_rag/       # FastAPI、RAG、Agent 与 Celery
+│   └── app/
+│       ├── api/      # HTTP 路由与参数处理
+│       ├── agent/    # 路由决策、工具循环、记忆、Trace 与流式传输
+│       ├── modules/  # 文档、入库、检索、Chat、任务与监控业务
+│       ├── workers/  # Celery 应用与任务入口
+│       ├── infra/    # 数据库、Redis 与文件存储
+│       ├── core/     # 配置、日志与错误处理
+│       └── shared/   # 通用传输与数据工具
+├── frontend/         # React + TypeScript 工作台
+├── db/               # MySQL 初始化与升级 SQL
+├── scripts/          # 启动、验证与性能测试入口
+├── tests/            # Python 回归测试
+├── docs/             # 架构、接口、运行与实验文档
+└── data/             # 上传文件与本地索引
 ```
 
-当前工具保持只读和小范围：
+路由保持轻量，可复用业务逻辑集中在 `modules`，Agent 编排位于 `agent`，基础设施访问位于 `infra`。
 
-| 工具 | 用途 |
+## 当前边界
+
+- **部署范围**：面向本地开发、演示和工程验证，多租户隔离、生产级密钥管理与部署编排仍需补充。
+- **SSE 状态**：事件缓存保存在 API 进程内，完成流默认保留 15 分钟，并受数量上限约束。API 重启、缓存淘汰或续传请求落到其他进程会导致恢复失败；多进程部署需保证续传回到原进程。
+- **并发模型**：Gateway 的 SSE 代理仍按活跃流占用受限数量的 OS 线程，高并发场景需要进一步评估与改造。
+- **引用粒度**：citations 关联消息、文档与 chunk，当前未提供完整的逐句证据 span。
+- **观测粒度**：部分检索阶段随工具结果聚合返回；界面展示实际事件，不代表每个内部步骤都有独立实时耗时。
+
+## 技术文档
+
+| 主题 | 文档 |
 | --- | --- |
-| `knowledge_search` | 检索 indexed 知识库，返回 chunk、score、标题和检索元数据 |
-| `get_document_detail` | 查询单个文档状态、元数据和 chunk 摘要 |
-| `list_ready_documents` | 列出当前已经可检索的文档 |
-| `list_message_citations` | 按 assistant message 查询已保存引用 |
-
-工具返回统一为 `{"ok": bool, "error": string | null, "data": object}`。只有 `ok=true` 的 `data` 会作为证据进入上下文；工具失败会写入 Trace，并允许模型基于已有观察给出带降级说明的回答。
-
-为了避免模型在“项目架构、文档内容、上传、embedding、索引”等明显知识库问题上漏掉检索，入口有一层轻量意图路由。命中时先执行 `knowledge_search`；问候和普通闲聊不会被强制拉进检索流程。这不是一个通用分类器，而是对当前系统行为边界的显式约束。
-
-## 前端不是聊天皮肤，而是一张运行中的系统剖面图
-
-前端工作台放在整条链路中间观察，而不是把聊天框放在最显眼的位置。左侧是文档及索引阶段，中间是从用户问题到 citations 落库的 Execution Flow，右侧是逐条到达的 Agent SSE Trace，底部则是运行依赖基线。
-
-![RAG Workbench：文档、Execution Flow、回答证据与 Agent Trace](./docs/rag-workbench-overview.png)
-
-工作台重点回答四个工程问题：
-
-1. 当前文档停在 Parsing、Chunking、Embedding 还是 Indexed？
-2. 本次问题经过了哪个节点，`knowledge_search` 是否成功，rerank 是否实际启用？
-3. 回答中的 `[1]`、`[2]` 来自哪个文档和 chunk？
-4. SSE 是否发生断线，恢复时使用了哪个 Last-Event-ID？
-
-Execution Flow 使用真实事件推进。后端目前在一次 `tool_result` 中聚合返回 LanceDB、MySQL hydration 和 rerank 信息，因此这几个节点会在工具结果到达后一起完成，界面不会编造不存在的逐节点实时耗时。回答本身包含引用编号时，编号直接连接来源；后端没有提供逐句 span 时，则使用明确的“本次检索证据”区域，不伪造句子级映射。
-
-## SSE 断线续传为什么不能只做前端重试
-
-如果浏览器断线后重新发起一次普通请求，最坏的结果不是少几个 token，而是重复创建 user message、重复生成、重复计费，甚至保存两份 assistant message。
-
-本项目的 SSE 事件具有以下约束：
-
-- 每个数据事件都包含 `type`。
-- 可续传事件带单调递增的 `id`。
-- 流最终以 `done` 或 `error` 结束。
-- 最终回答和 citations 必须先持久化，再发送 `done`。
-- 客户端使用 `Last-Event-ID` 恢复，服务端只重放之后的事件。
-- 客户端断开后，生成线程继续执行；续传状态默认保留 15 分钟。
-- 状态过期时明确失败，不能悄悄重启一次生成。
-
-普通 Chat 首次经过 Gateway 时会创建 `user_message_id`，Gateway 再通过 `X-User-Message-ID` 暴露给前端。重连请求移除原始 `content`，改为携带同一个 `user_message_id` 和 Last-Event-ID，从而命中同一条可续传流。Agent 流则使用稳定 `trace_id` 识别同一次运行。
-
-右侧 Agent Trace 保留 `agent_step -> tool_call -> tool_result -> delta -> final -> done` 的顺序，并展示 `run_id`、`step_id`、`tool_name`、`event_id` 与 Last-Event-ID。连续 delta 会合并显示，避免 token 事件淹没真正有诊断价值的步骤。
-
-## 如何在本地启动
-
-### 1. 准备配置与依赖
-
-```bash
-cp .env.example .env
-
-conda create -n rag-api python=3.10
-conda activate rag-api
-pip install -r python_rag/requirements.txt
-pip install -r python_rag/requirements-dev.txt
-
-cd frontend
-npm install
-cd ..
-```
-
-MySQL 和 Redis 需要先可用。初始化或升级数据库：
-
-```bash
-bash scripts/init_db.sh
-```
-
-Gateway 需要 C++17、CMake、Drogon、CURL、JsonCpp 以及 Drogon 的 MySQL / Redis 依赖。统一启动脚本在二进制不存在时会自动执行 CMake；也可以手动构建：
-
-```bash
-cmake -S cpp_gateway -B cpp_gateway/build -DCMAKE_BUILD_TYPE=Debug
-cmake --build cpp_gateway/build -j
-```
-
-### 2. 确认模型入口
-
-默认使用远端 OpenAI-compatible API。下面的命令只检查 `/models`，不会启动本地 vLLM：
-
-```bash
-bash scripts/start_vllm.sh
-```
-
-使用本地 vLLM 时，在单独终端显式启动：
-
-```bash
-LLM_RUNTIME=local_vllm bash scripts/start_vllm.sh
-```
-
-### 3. 启动完整工作台
-
-```bash
-START_FRONTEND=true bash scripts/start_all.sh start
-```
-
-需要首次启动时顺便初始化数据库：
-
-```bash
-START_INIT_DB=true START_FRONTEND=true bash scripts/start_all.sh start
-```
-
-统一入口支持整栈或单服务操作：
-
-| 命令 | 行为 |
-| --- | --- |
-| `bash scripts/start_all.sh start` | 启动 API、Worker、Gateway |
-| `START_FRONTEND=true bash scripts/start_all.sh start` | 同时启动前端 |
-| `bash scripts/start_all.sh restart api` | 只重启 FastAPI |
-| `bash scripts/start_all.sh stop gateway` | 只停止 Gateway |
-| `bash scripts/start_all.sh status` | 查看 PID 与 HTTP 健康状态 |
-| `bash scripts/start_all.sh logs worker` | 查看 Worker 最近日志 |
-| `FOLLOW_LOGS=true bash scripts/start_all.sh logs` | 跟随全部服务日志 |
-| `bash scripts/start_all.sh e2e ./README.md` | 使用仓库内现有文档执行完整 E2E |
-
-PID 保存在 `.run/`，日志写入 `logs/`。服务使用独立进程组启动，停止时会终止整个进程组，避免只退出启动 shell 而遗留 Uvicorn、Celery 或 Vite 子进程。启动脚本会等待 HTTP 端口响应；`status` 同时区分进程停止、接口不可达和依赖降级。
-
-单独调试某个进程时仍可直接运行：
-
-```bash
-bash scripts/start_api.sh
-bash scripts/start_worker.sh
-bash cpp_gateway/scripts/start_gateway.sh
-```
-
-完整脚本说明见 [scripts/README.md](scripts/README.md)。
-
-## 本地模型与 GPU 分工
-
-LLM 与 embedding / rerank 是不同类型的负载：LLM 可以由独立 vLLM 进程提供 OpenAI-compatible 接口；embedding 和 rerank 在 FastAPI / Worker 内加载。
-
-本地 vLLM 示例：
-
-```bash
-LLM_RUNTIME=local_vllm
-LLM_BASE_URL=http://127.0.0.1:9000/v1
-LLM_MODEL=Qwen3-14B
-VLLM_MODEL_PATH=/path/to/Qwen3-14B
-VLLM_SERVED_MODEL_NAME=Qwen3-14B
-VLLM_CUDA_VISIBLE_DEVICES=4,5
-VLLM_TENSOR_PARALLEL_SIZE=2
-```
-
-默认检索模型：
-
-```bash
-EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
-RERANK_MODEL=Qwen/Qwen3-Reranker-0.6B
-```
-
-如果希望 Python 侧留在 CPU，或绑定到独立 GPU：
-
-```bash
-PYTHON_DISABLE_CUDA=true
-
-# 或分别控制
-API_CUDA_VISIBLE_DEVICES=6
-WORKER_CUDA_VISIBLE_DEVICES=6
-```
-
-不要在业务代码中写死物理 GPU 编号。启动脚本通过 `CUDA_VISIBLE_DEVICES` 暴露设备，进程内部仍从 `cuda:0` 开始使用可见设备。
-
-## 代码如何分层
-
-```text
-Repo/
-├── cpp_gateway/          # Drogon C++ 对外网关
-├── python_rag/           # FastAPI、Celery、RAG、Agent
-├── frontend/             # Vite + React + TypeScript 工作台
-├── db/                   # MySQL 初始化与升级脚本
-├── scripts/              # 启动、smoke 与 E2E
-├── docs/                 # API、环境、性能、容量与演示说明
-├── data/                 # 上传文件和本地索引
-└── tests/                # Python 回归测试
-```
-
-`python_rag/app` 的内部边界：
-
-```text
-api/v1/routers/   HTTP 参数与内部路由
-agent/            Agent runner、intent、tools、memory、trace、streaming
-modules/          documents、ingest、retrieval、chat、sessions、messages、tasks
-workers/          Celery app 与 worker task
-infra/            MySQL、Redis、Storage 与 schema support
-core/             config、logger、error 与 exception handlers
-shared/           无业务状态的通用传输工具
-```
-
-路由只做入口与参数转换；可复用业务逻辑进入 `modules`；Agent 编排放在 `agent`；异步任务入口放在 `workers`；基础设施访问收敛到 `infra`。这个分层不是为了增加抽象层，而是为了让 HTTP、业务规则和执行环境可以分别测试。
-
-## 常用 API 与验证入口
-
-| Method | Path | 说明 |
-| --- | --- | --- |
-| `POST` | `/v1/documents` | 上传文件并提交 ingest |
-| `POST` | `/v1/documents/web` | 从网页创建文档并提交 ingest |
-| `GET` | `/v1/documents` | 查询文档和索引状态 |
-| `POST` | `/v1/sessions` | 创建会话 |
-| `GET` | `/v1/sessions/{id}/messages` | 查询消息与 citations |
-| `POST` | `/v1/chat/stream` | 普通 RAG SSE |
-| `POST` | `/v1/agent/chat/stream` | Agent SSE 与 Trace 事件 |
-| `GET` | `/v1/tasks/{task_id}` | 查询异步任务 |
-| `GET` | `/v1/monitor/overview` | 查询运行与 RAG 摘要 |
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:8000/internal/health
-curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/v1/monitor/overview
-```
-
-Agent Trace 内部调试入口：
-
-```text
-GET /internal/agent/runs/{run_id}
-GET /internal/agent/runs/{run_id}/steps
-```
-
-代码级验证：
-
-```bash
-python -m pytest
-python -m compileall python_rag tests
-bash scripts/ci_smoke.sh
-```
-
-完整链路验证：
-
-```bash
-bash scripts/e2e_all.sh ./README.md
-```
-
-E2E 会写入真实的用户、文档、任务和消息记录。不传文件参数时，脚本默认使用仓库根目录的 `README.md`；也可以显式传入其他待上传文件。
-
-## 当前取舍与仍然开放的问题
-
-这套实现面向本地开发、演示和工程验证，而不是把所有生产问题藏在一个 README 后面。当前边界包括：
-
-- Gateway 的 SSE 代理仍按活跃流占用受限数量的 OS thread，高并发场景还需要异步客户端或线程池演进。
-- 对外尚无历史 Sessions / Agent Runs 列表接口；前端不会伪造刷新后不存在的历史记录。
-- LanceDB 没有独立健康接口；工作台在没有真实证据时显示 unknown / no indexed docs。
-- 后端 citations 以消息和 chunk 为粒度；真正逐句的证据连线需要额外返回 answer span。
-- 多租户隔离、生产级密钥管理和部署编排不是当前项目重点。
-
-这些限制会明确显示，而不是用虚构百分比或“健康”状态掩盖。对一个可调试的 RAG 系统来说，知道哪里没有证据，和知道哪里运行正常同样重要。
-
-## 延伸阅读
-
-- [文档地图：按问题选择技术文章](docs/README.md)
-- [运行环境与排障](docs/environment.md)
-- [Agent MVP 说明](docs/agent_mvp.md)
-- [Agent API](docs/api_agent.md)
-- [演示案例](docs/demo_cases.md)
-- [RAG ingest / retrieval 容量设计](docs/rag_ingest_retrieval_capacity.md)
-- [Embedding 微调实验](docs/embedding_finetune.md)
-- [性能测试指南](docs/performance_test_guide.md)
-- [Gateway 鉴权与限流](docs/gateway_auth_rate_limit.md)
-- [监控指标说明](docs/monitoring_metrics.md)
+| 文档索引 | [完整文档导航](docs/README.md) |
+| 系统架构 | [架构概览](docs/architecture.md) · [数据库关系](docs/数据库关系.md) |
+| 本地运行 | [环境与排障](docs/environment.md) · [启动脚本](scripts/README.md) |
+| Agent 与接口 | [Agent 设计](docs/agent_mvp.md) · [API 契约](docs/api_agent.md) |
+| 网关安全 | [鉴权与限流](docs/gateway_auth_rate_limit.md) |
+| 检索与容量 | [Ingest / Retrieval 容量设计](docs/rag_ingest_retrieval_capacity.md) |
+| 监控与性能 | [监控指标](docs/monitoring_metrics.md) · [性能测试指南](docs/performance_test_guide.md) |
+| 演示与实验 | [演示案例](docs/demo_cases.md) · [Embedding 微调复盘](docs/embedding_finetune.md) |
